@@ -2,6 +2,7 @@
 
 import os
 from functools import lru_cache
+from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -23,6 +24,19 @@ class Settings(BaseSettings):
     bq_max_rows: int = 100
     bq_query_timeout_seconds: int = 30
     sql_max_attempts: int = 3
+
+    # RAG: embeddings (Vertex AI) and hybrid retrieval over data/docs.
+    embedding_model: str
+    embedding_location: str
+    embedding_dim: int = 768
+    embedding_batch_size: int = 50  # Vertex allows up to 250 texts per request
+    docs_dir: Path = Path("data/docs")
+    chroma_dir: Path = Path("data/chroma")
+    rag_collection: str = "shopco_docs"
+    chunk_size: int = 800  # characters
+    chunk_overlap: int = 100  # characters
+    rag_top_k: int = 5
+    rrf_k: int = 60  # reciprocal rank fusion constant
 
     def export_to_environ(self) -> None:
         """Copy the Google settings into os.environ.

@@ -14,6 +14,8 @@ def test_settings_export_to_environ(monkeypatch) -> None:
         google_cloud_project="test-project",
         google_cloud_location="global",
         worker_model="some-model",
+        embedding_model="some-embedding-model",
+        embedding_location="global",
     )
     settings.export_to_environ()
 

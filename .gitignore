@@ -11,3 +11,6 @@ __pycache__/
 
 # Local reference material (not part of the project)
 reference/
+
+# Local vector store and chunk index (rebuilt by make ingest)
+data/chroma/

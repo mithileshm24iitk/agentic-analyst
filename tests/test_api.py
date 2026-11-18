@@ -3,7 +3,7 @@
 from fastapi.testclient import TestClient
 
 from app.agent_service import AgentResult
-from app.main import app, get_agent_service, get_sql_service
+from app.main import app, get_agent_service, get_rag_service, get_sql_service
 
 # Not using `with TestClient(...)`, so the startup hook (which needs .env and GCP) does not run.
 client = TestClient(app)
@@ -85,4 +85,37 @@ def test_ask_sql_when_agent_never_ran_a_query() -> None:
         "sql": None,
         "rows": [],
         "attempts": 0,
+    }
+
+
+def test_ask_rag_returns_answer_sources_and_chunks() -> None:
+    chunk = {
+        "chunk_id": "returns_policy.md:c3",
+        "source": "returns_policy.md",
+        "heading": "ShopCo Returns Policy > Maximum acceptable return rate per product category",
+        "text": "Jeans: maximum acceptable return rate is 11.0%.",
+        "score": 0.0325,
+    }
+    state = {"rag_sources": ["returns_policy.md"], "rag_chunks": [chunk]}
+    use_fake("The maximum is 11.0% [returns_policy.md].", state, dependency=get_rag_service)
+
+    response = client.post("/ask/rag", json={"question": "Max return rate for Jeans?"})
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "answer": "The maximum is 11.0% [returns_policy.md].",
+        "sources": ["returns_policy.md"],
+        "chunks": [chunk],
+    }
+
+
+def test_ask_rag_when_nothing_was_retrieved() -> None:
+    use_fake("The documents do not contain this information.", {}, dependency=get_rag_service)
+
+    response = client.post("/ask/rag", json={"question": "Who founded ShopCo?"})
+
+    assert response.json() == {
+        "answer": "The documents do not contain this information.",
+        "sources": [],
+        "chunks": [],
     }

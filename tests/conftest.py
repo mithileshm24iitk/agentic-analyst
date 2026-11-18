@@ -1,11 +1,14 @@
-"""Shared test fakes: settings, a fake BigQuery client and a fake ToolContext."""
+"""Shared test fakes: settings, a fake BigQuery client, a fake ToolContext and a fake embedder."""
 
+import hashlib
 from types import SimpleNamespace
 
 import pytest
 
 from app.config import Settings
 from tools import bigquery_tools
+from tools.retrieval.bm25 import tokenize
+from tools.retrieval.ingest import IngestReport, ingest
 
 DATASET = "bigquery-public-data.thelook_ecommerce"
 
@@ -18,6 +21,8 @@ def settings(monkeypatch) -> Settings:
         google_cloud_project="test-project",
         google_cloud_location="global",
         worker_model="test-model",
+        embedding_model="fake-embedding",
+        embedding_location="global",
         bq_dataset=DATASET,
         bq_max_bytes_billed=1_000,
         bq_max_rows=3,
@@ -66,3 +71,68 @@ def fake_client(monkeypatch, settings) -> FakeBigQueryClient:
 def make_tool_context(invocation_id: str = "inv-1", state: dict | None = None):
     """Stands in for ADK's ToolContext: run_query only uses .state and .invocation_id."""
     return SimpleNamespace(state={} if state is None else state, invocation_id=invocation_id)
+
+
+# ---------------------------------------------------------------- RAG fakes
+
+
+class FakeEmbedder:
+    """Deterministic bag-of-words embedder: each word adds 1 to a hashed dimension.
+
+    Texts sharing words get similar vectors, which is enough to test retrieval
+    plumbing without calling Vertex AI. Uses hashlib (Python's hash() is random per run).
+    """
+
+    def __init__(self, dim: int = 256) -> None:
+        self.dim = dim
+        self.calls = 0  # number of embed_documents calls
+
+    def _vector(self, text: str) -> list[float]:
+        vec = [0.0] * self.dim
+        for token in tokenize(text):
+            vec[int(hashlib.md5(token.encode()).hexdigest(), 16) % self.dim] += 1.0
+        if not any(vec):
+            vec[0] = 1.0  # cosine distance needs a non-zero vector
+        return vec
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        self.calls += 1
+        return [self._vector(t) for t in texts]
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._vector(text)
+
+
+@pytest.fixture
+def rag_settings(tmp_path) -> Settings:
+    """Settings pointing at a temporary docs dir and Chroma dir."""
+    docs_dir = tmp_path / "docs"
+    docs_dir.mkdir()
+    return Settings(
+        _env_file=None,
+        google_cloud_project="test-project",
+        google_cloud_location="global",
+        worker_model="test-model",
+        embedding_model="fake-embedding",
+        embedding_location="global",
+        embedding_dim=256,
+        docs_dir=docs_dir,
+        chroma_dir=tmp_path / "chroma",
+        rag_collection="test_docs",
+        chunk_size=300,
+        chunk_overlap=50,
+        rag_top_k=3,
+    )
+
+
+def run_ingest(settings: Settings, embedder) -> IngestReport:
+    return ingest(
+        docs_dir=settings.docs_dir,
+        chroma_dir=settings.chroma_dir,
+        collection_name=settings.rag_collection,
+        embedder=embedder,
+        embedding_model=settings.embedding_model,
+        embedding_dim=settings.embedding_dim,
+        chunk_size=settings.chunk_size,
+        overlap=settings.chunk_overlap,
+    )

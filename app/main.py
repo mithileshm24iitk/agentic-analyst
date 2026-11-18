@@ -1,4 +1,4 @@
-"""FastAPI app: GET /health, POST /ask and POST /ask/sql."""
+"""FastAPI app: GET /health, POST /ask, POST /ask/sql and POST /ask/rag."""
 
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -7,10 +7,12 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, StringConstraints
 
 from agents.assistant import build_assistant
+from agents.rag_agent import build_rag_agent
 from agents.sql_agent import build_sql_agent
 from app.agent_service import AgentService
 from app.config import get_settings
 from tools.bigquery_tools import STATE_ATTEMPTS, STATE_LAST_ROWS, STATE_LAST_SQL
+from tools.rag_tools import STATE_CHUNKS, STATE_SOURCES
 
 
 @asynccontextmanager
@@ -22,6 +24,7 @@ async def lifespan(app: FastAPI):
     app.state.sql_service = AgentService(
         build_sql_agent(settings.worker_model, settings.bq_dataset, settings.sql_max_attempts)
     )
+    app.state.rag_service = AgentService(build_rag_agent(settings.worker_model))
     yield
 
 
@@ -43,6 +46,20 @@ class SqlAskResponse(BaseModel):
     attempts: int
 
 
+class RagChunk(BaseModel):
+    chunk_id: str
+    source: str
+    heading: str
+    text: str
+    score: float
+
+
+class RagAskResponse(BaseModel):
+    answer: str
+    sources: list[str]  # files the retrieved chunks came from
+    chunks: list[RagChunk]  # every chunk retrieved for this question
+
+
 # Dependencies, so tests can swap in fake agents.
 def get_agent_service(request: Request) -> AgentService:
     return request.app.state.agent_service
@@ -50,6 +67,10 @@ def get_agent_service(request: Request) -> AgentService:
 
 def get_sql_service(request: Request) -> AgentService:
     return request.app.state.sql_service
+
+
+def get_rag_service(request: Request) -> AgentService:
+    return request.app.state.rag_service
 
 
 @app.get("/health")
@@ -81,4 +102,19 @@ async def ask_sql(
         sql=result.state.get(STATE_LAST_SQL),
         rows=result.state.get(STATE_LAST_ROWS, []),
         attempts=result.state.get(STATE_ATTEMPTS, 0),
+    )
+
+
+@app.post("/ask/rag", response_model=RagAskResponse)
+async def ask_rag(
+    body: AskRequest,
+    service: Annotated[AgentService, Depends(get_rag_service)],
+) -> RagAskResponse:
+    result = await service.ask(body.question)
+    if not result.answer:
+        raise HTTPException(status_code=502, detail="The RAG agent returned no answer.")
+    return RagAskResponse(
+        answer=result.answer,
+        sources=result.state.get(STATE_SOURCES, []),
+        chunks=result.state.get(STATE_CHUNKS, []),
     )
