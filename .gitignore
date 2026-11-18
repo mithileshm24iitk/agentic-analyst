@@ -17,3 +17,9 @@ data/chroma/
 
 # Reports written by the save_report tool
 reports/
+
+# Request metrics (JSONL) written by the app and make bench
+data/metrics/
+
+# Raw per-question evaluation cache (eval/results.md and eval/baseline.json are tracked)
+eval/results/raw/

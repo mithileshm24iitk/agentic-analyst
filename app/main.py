@@ -1,4 +1,5 @@
-"""FastAPI app: GET /health, POST /ask (orchestrator), POST /ask/sql and POST /ask/rag (debugging)."""
+"""FastAPI app: GET /health, POST /ask (orchestrator), POST /ask/sql and POST /ask/rag (debugging),
+GET /metrics/summary."""
 
 import logging
 import uuid
@@ -16,7 +17,11 @@ from agents.sql_agent import build_sql_agent
 from app.agent_service import AgentResult, AgentService
 from app.config import get_settings
 from app.errors import ApiError, run_agent_safely, set_request_id
+from app.metrics import append_record, finish_request, response_metrics, start_request
+from app.metrics_plugin import MetricsPlugin
+from app.metrics_summary import build_summary
 from app.orchestration import AgentCritic, Orchestration, build_ask_response
+from app.tracing import request_span, setup_tracing
 from tools.bigquery_tools import STATE_ATTEMPTS, STATE_LAST_ROWS, STATE_LAST_SQL
 from tools.rag_tools import STATE_CHUNKS, STATE_SOURCES
 from tools.upstream import STATE_UPSTREAM_ERROR
@@ -29,19 +34,22 @@ async def lifespan(app: FastAPI):
     """On startup: load config and build the agents once."""
     s = get_settings()
     s.export_to_environ()
+    setup_tracing(s.tracing_exporter, s.google_cloud_project)
     app.state.request_timeout_seconds = s.request_timeout_seconds
-    timeout = s.llm_timeout_seconds
+    app.state.metrics_path = s.metrics_path
+    llm = {"timeout_seconds": s.llm_timeout_seconds, "thinking_level": s.thinking_level or None}
+    plugins = [MetricsPlugin(s.model_prices)]  # one shared plugin: counts every runner's calls
+
     orchestrator = AgentService(
-        build_orchestrator(
-            s.orchestrator_model, s.worker_model, s.bq_dataset, s.sql_max_attempts, timeout_seconds=timeout
-        )
+        build_orchestrator(s.orchestrator_model, s.worker_model, s.bq_dataset, s.sql_max_attempts, **llm),
+        plugins,
     )
-    critic = AgentCritic(AgentService(build_critic(s.critic_model, timeout_seconds=timeout)))
+    critic = AgentCritic(AgentService(build_critic(s.critic_model, **llm), plugins))
     app.state.orchestration = Orchestration(orchestrator, critic, s.critic_max_revisions)
     app.state.sql_service = AgentService(
-        build_sql_agent(s.worker_model, s.bq_dataset, s.sql_max_attempts, timeout_seconds=timeout)
+        build_sql_agent(s.worker_model, s.bq_dataset, s.sql_max_attempts, **llm), plugins
     )
-    app.state.rag_service = AgentService(build_rag_agent(s.worker_model, timeout_seconds=timeout))
+    app.state.rag_service = AgentService(build_rag_agent(s.worker_model, **llm), plugins)
     yield
 
 
@@ -69,20 +77,48 @@ async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
     )
 
 
-async def run_agent(request: Request, service: Any, question: str) -> AgentResult:
-    """The single path every /ask endpoint uses to call an agent."""
+async def run_agent(
+    request: Request, service: Any, question: str, endpoint: str, default_route: str | None = None
+) -> tuple[AgentResult, dict[str, Any]]:
+    """The single path every /ask endpoint uses to call an agent.
+
+    Also opens the request's root trace span and its metrics record, and writes
+    one JSON line to METRICS_PATH whether the request succeeds or fails.
+    Returns the agent result and the metrics record.
+    """
     request_id = request.state.request_id
-    result = await run_agent_safely(
-        service.ask(question), request_id, request.app.state.request_timeout_seconds
-    )
-    # A tool hit an auth or quota error and told the agent to stop: report that
-    # failure instead of a 200 answer that only says the data is unavailable.
-    upstream = result.state.get(STATE_UPSTREAM_ERROR)
-    if upstream:
-        raise ApiError(upstream["error_type"], request_id)
-    if not result.answer:
-        raise ApiError("empty_answer", request_id)
-    return result
+    with request_span(request_id, endpoint) as span:
+        start_request(request_id, question, endpoint)
+        result: AgentResult | None = None
+        try:
+            result = await run_agent_safely(
+                service.ask(question), request_id, request.app.state.request_timeout_seconds
+            )
+            # A tool hit an auth or quota error and told the agent to stop: report that
+            # failure instead of a 200 answer that only says the data is unavailable.
+            upstream = result.state.get(STATE_UPSTREAM_ERROR)
+            if upstream:
+                raise ApiError(upstream["error_type"], request_id)
+            if not result.answer:
+                raise ApiError("empty_answer", request_id)
+        except ApiError as e:
+            _close_request(request, span, e.error_type, result, default_route)
+            raise
+        record = _close_request(request, span, "ok", result, default_route)
+        return result, record
+
+
+def _close_request(
+    request: Request, span: Any, status: str, result: AgentResult | None, default_route: str | None
+) -> dict[str, Any]:
+    """Finish the metrics record, tag the root span, append the JSON line."""
+    record = finish_request(request.state.request_id, status, result.state if result else {}, default_route)
+    span.set_attribute("route", record["route"])
+    span.set_attribute("status", status)
+    metrics_path = getattr(request.app.state, "metrics_path", None)
+    if metrics_path is not None:
+        append_record(metrics_path, record)
+    return record
 
 
 # ---------------------------------------------------------------- models
@@ -98,6 +134,17 @@ class CriticSummary(BaseModel):
     revisions: int
 
 
+class RequestMetricsSummary(BaseModel):
+    latency_ms: float
+    llm_calls: int
+    input_tokens: int
+    output_tokens: int
+    thinking_tokens: int
+    cost_usd: float | None  # None when a model's price is not in the price table
+    sql_attempts: int
+    revisions: int
+
+
 class AskResponse(BaseModel):
     answer: str
     route: str  # docs / sql / both / none
@@ -108,6 +155,7 @@ class AskResponse(BaseModel):
     cited_sources: list[str]  # files the answer actually cites (and that were retrieved)
     critic: CriticSummary
     saved_report: str | None
+    metrics: RequestMetricsSummary
 
 
 class SqlAskResponse(BaseModel):
@@ -158,8 +206,8 @@ async def ask(
     request: Request,
     orchestration: Annotated[Orchestration, Depends(get_orchestration)],
 ) -> dict[str, Any]:
-    result = await run_agent(request, orchestration, body.question)
-    return build_ask_response(result)
+    result, record = await run_agent(request, orchestration, body.question, "/ask")
+    return {**build_ask_response(result), "metrics": response_metrics(record)}
 
 
 @app.post("/ask/sql", response_model=SqlAskResponse)
@@ -168,7 +216,7 @@ async def ask_sql(
     request: Request,
     service: Annotated[AgentService, Depends(get_sql_service)],
 ) -> SqlAskResponse:
-    result = await run_agent(request, service, body.question)
+    result, _ = await run_agent(request, service, body.question, "/ask/sql", default_route="sql")
     return SqlAskResponse(
         answer=result.answer,
         sql=result.state.get(STATE_LAST_SQL),
@@ -183,9 +231,15 @@ async def ask_rag(
     request: Request,
     service: Annotated[AgentService, Depends(get_rag_service)],
 ) -> RagAskResponse:
-    result = await run_agent(request, service, body.question)
+    result, _ = await run_agent(request, service, body.question, "/ask/rag", default_route="docs")
     return RagAskResponse(
         answer=result.answer,
         sources=result.state.get(STATE_SOURCES, []),
         chunks=result.state.get(STATE_CHUNKS, []),
     )
+
+
+@app.get("/metrics/summary")
+def metrics_summary(request: Request) -> dict[str, Any]:
+    """Aggregate METRICS_PATH: overall and per route. A missing or empty file gives zero requests."""
+    return build_summary(request.app.state.metrics_path)

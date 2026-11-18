@@ -4,8 +4,30 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import model_validator
+from typing import Literal
+
+from pydantic import BaseModel, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class ModelPrice(BaseModel):
+    """USD per 1M tokens. Thinking tokens are billed as output tokens."""
+
+    input_per_1m: float
+    output_per_1m: float  # "Text output (response and reasoning)" on the pricing page
+    cached_input_per_1m: float | None = None  # None = charge cached tokens at the input rate
+
+
+# Source: https://cloud.google.com/vertex-ai/generative-ai/pricing
+# Read on 2026-11-19, "Gemini 3 Standard", Global endpoint, prompts <= 200K tokens.
+# gemini-3.8-flash is on introductory pricing "through December 31, 2026";
+# from January 1, 2027 the page lists $1.50 input / $0.15 cached input / $7.50 output.
+# Only models whose rows could be read unambiguously are listed; others report cost null.
+# Not costed: query embeddings (gemini-embedding-001, a few tokens per question) are not
+# LLM calls and are not in the per-request cost.
+DEFAULT_MODEL_PRICES: dict[str, ModelPrice | None] = {
+    "gemini-3.8-flash": ModelPrice(input_per_1m=0.75, output_per_1m=3.75, cached_input_per_1m=0.075),
+}
 
 
 class Settings(BaseSettings):
@@ -50,10 +72,28 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 90
     request_timeout_seconds: int = 270
 
+    # Gemini thinking effort for every agent, sent as thinking_config.thinking_level.
+    # gemini-3.8-flash supports LOW, MEDIUM, HIGH (its own default is MEDIUM).
+    # Empty = don't send it, so the model uses its default. Decided by `make bench`.
+    thinking_level: Literal["", "LOW", "MEDIUM", "HIGH"] = ""
+
+    # Metrics, tracing, benchmark, evaluation.
+    metrics_path: Path = Path("data/metrics/requests.jsonl")
+    tracing_exporter: Literal["none", "console", "gcp"] = "none"
+    bench_runs: int = 2
+    judge_model: str | None = None
+    strong_orchestrator_model: str = "gemini-4-argon"
+    eval_concurrency: int = 4
+    eval_max_drop_points: float = 10.0  # percentage points (0-100) allowed drop vs baseline.json
+    # USD per 1M tokens per model. A model missing here, or mapped to null, gets
+    # cost_usd = null: we never guess a price. Override with MODEL_PRICES='{"model": {...}}'.
+    model_prices: dict[str, ModelPrice | None] = Field(default_factory=lambda: dict(DEFAULT_MODEL_PRICES))
+
     @model_validator(mode="after")
     def _default_models_to_worker(self) -> "Settings":
         self.orchestrator_model = self.orchestrator_model or self.worker_model
         self.critic_model = self.critic_model or self.worker_model
+        self.judge_model = self.judge_model or self.worker_model
         return self
 
     def export_to_environ(self) -> None:

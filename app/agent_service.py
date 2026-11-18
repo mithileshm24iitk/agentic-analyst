@@ -5,7 +5,9 @@ from typing import Any
 
 from google.adk.agents import BaseAgent
 from google.adk.agents.run_config import RunConfig, ToolThreadPoolConfig
+from google.adk.apps import App
 from google.adk.events import Event, EventActions
+from google.adk.plugins.base_plugin import BasePlugin
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
 from google.genai import types
@@ -49,10 +51,13 @@ class AgentService:
     to run several turns in one session.
     """
 
-    def __init__(self, agent: BaseAgent) -> None:
+    def __init__(self, agent: BaseAgent, plugins: list[BasePlugin] | None = None) -> None:
         self.agent = agent
         self._sessions = InMemorySessionService()
-        self._runner = Runner(app_name=APP_NAME, agent=agent, session_service=self._sessions)
+        # Plugins (e.g. metrics) are registered on an App; ADK applies them to every
+        # agent, model call and tool this runner manages, sub-agents included.
+        app = App(name=APP_NAME, root_agent=agent, plugins=plugins or [])
+        self._runner = Runner(app=app, session_service=self._sessions)
 
     async def start_session(self) -> str:
         session = await self._sessions.create_session(app_name=APP_NAME, user_id=USER_ID)

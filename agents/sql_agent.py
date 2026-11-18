@@ -14,6 +14,7 @@ def build_sql_agent(
     max_attempts: int,
     mode: str | None = None,
     timeout_seconds: int | None = None,
+    thinking_level: str | None = None,
 ) -> Agent:
     """Create the SQL agent. Model, dataset and attempt cap come from config.
 
@@ -23,7 +24,7 @@ def build_sql_agent(
         name="sql_agent",
         model=model,
         mode=mode,
-        generate_content_config=llm_config(timeout_seconds),
+        generate_content_config=llm_config(timeout_seconds, thinking_level),
         description=f"Answers data questions by querying the BigQuery dataset {dataset}.",
         instruction=f"""You answer questions about the BigQuery dataset `{dataset}`.
 

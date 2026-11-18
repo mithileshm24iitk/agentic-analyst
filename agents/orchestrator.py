@@ -79,6 +79,7 @@ def build_orchestrator(
     dataset: str,
     sql_max_attempts: int,
     timeout_seconds: int | None = None,
+    thinking_level: str | None = None,
 ) -> Agent:
     """Create the orchestrator with fresh single-turn copies of both specialists.
 
@@ -91,12 +92,19 @@ def build_orchestrator(
         description="Answers ShopCo business questions using documents and the sales database.",
         instruction=INSTRUCTION,
         sub_agents=[
-            build_rag_agent(worker_model, mode="single_turn", timeout_seconds=timeout_seconds),
+            build_rag_agent(
+                worker_model, mode="single_turn", timeout_seconds=timeout_seconds, thinking_level=thinking_level
+            ),
             build_sql_agent(
-                worker_model, dataset, sql_max_attempts, mode="single_turn", timeout_seconds=timeout_seconds
+                worker_model,
+                dataset,
+                sql_max_attempts,
+                mode="single_turn",
+                timeout_seconds=timeout_seconds,
+                thinking_level=thinking_level,
             ),
         ],
         tools=[save_report],
         before_tool_callback=record_agent_call,
-        generate_content_config=llm_config(timeout_seconds),
+        generate_content_config=llm_config(timeout_seconds, thinking_level),
     )

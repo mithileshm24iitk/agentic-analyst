@@ -59,7 +59,14 @@ def test_ask_returns_full_orchestrator_response() -> None:
     response = client.post("/ask", json={"question": "  Which categories breach?  "})
 
     assert response.status_code == 200
-    assert response.json() == {
+    body = response.json()
+    metrics = body.pop("metrics")
+    assert set(metrics) == {
+        "latency_ms", "llm_calls", "input_tokens", "output_tokens", "thinking_tokens",
+        "cost_usd", "sql_attempts", "revisions",
+    }
+    assert metrics["llm_calls"] == 0  # the fake service makes no model calls
+    assert body == {
         "answer": answer,
         "route": "both",
         "agents_called": ["rag_agent", "sql_agent"],

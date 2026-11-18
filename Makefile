@@ -2,7 +2,7 @@ PY := .venv/bin/python
 PORT ?= 8000
 Q ?= Which product categories are above their maximum acceptable return rate?
 
-.PHONY: install run test test-integration ingest ask ask-sql ask-rag
+.PHONY: install run test test-integration ingest ask ask-sql ask-rag bench summary eval-smoke eval eval-retrieval eval-check
 
 install:
 	$(PY) -m pip install -r requirements.txt
@@ -36,3 +36,25 @@ ingest:
 ask-rag:
 	curl -s -X POST localhost:$(PORT)/ask/rag -H "Content-Type: application/json" \
 		-d '{"question": "$(Q)"}'; echo
+
+# Latency benchmark: 5 fixed questions x BENCH_RUNS through /ask (real GCP calls).
+# Try another thinking level with: make bench THINKING_LEVEL=LOW
+bench:
+	$(if $(THINKING_LEVEL),THINKING_LEVEL=$(THINKING_LEVEL)) $(PY) -m eval.bench
+
+# Aggregated metrics from METRICS_PATH (needs make run)
+summary:
+	curl -s localhost:$(PORT)/metrics/summary; echo
+
+# Phase 6 evaluation harness targets
+eval-retrieval:
+	$(PY) -m eval.retrieval_eval
+
+eval-smoke:
+	$(PY) -m eval.run_eval --smoke
+
+eval:
+	$(PY) -m eval.run_eval $(ARGS)
+
+eval-check:
+	$(PY) -m eval.run_eval --smoke --check-baseline $(if $(MAX_DROP),--max-drop-points $(MAX_DROP))

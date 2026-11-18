@@ -9,7 +9,9 @@ from tools.rag_tools import retrieve
 
 
 def build_rag_agent(
-    model: str | BaseLlm, mode: str | None = None, timeout_seconds: int | None = None
+    model: str | BaseLlm, mode: str | None = None,
+    timeout_seconds: int | None = None,
+    thinking_level: str | None = None,
 ) -> Agent:
     """Create the RAG agent. The model comes from config.
 
@@ -19,7 +21,7 @@ def build_rag_agent(
         name="rag_agent",
         model=model,
         mode=mode,
-        generate_content_config=llm_config(timeout_seconds),
+        generate_content_config=llm_config(timeout_seconds, thinking_level),
         description=(
             "Answers questions about ShopCo's policies, KPI definitions, thresholds, "
             "owners, processes and data dictionary, citing the source documents."
