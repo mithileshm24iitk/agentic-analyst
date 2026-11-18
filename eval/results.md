@@ -1,5 +1,7 @@
 # Phase 6 Evaluation Report
 
+> **Note:** This report comes from a smoke run (8 questions, System C only). It is not the final evaluation and will be replaced by the final run (`make eval`).
+
 Generated: 2026-11-18T22:11:39+00:00
 
 ## 1. Systems Compared

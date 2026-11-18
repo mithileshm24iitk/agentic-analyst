@@ -23,3 +23,18 @@ data/metrics/
 
 # Raw per-question evaluation cache (eval/results.md and eval/baseline.json are tracked)
 eval/results/raw/
+
+# Tool caches and build artefacts
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+build/
+dist/
+
+# OS and editor files
+.DS_Store
+.idea/
+.vscode/
+*.swp
