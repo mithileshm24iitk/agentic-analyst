@@ -1,7 +1,13 @@
-reference/
-.venv/
+# Secrets and local config
 .env
-reference/
+
+# Virtual environment
 .venv/
-.env
+
+# Python caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Local reference material (not part of the project)
 reference/
