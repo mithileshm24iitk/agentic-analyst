@@ -1,15 +1,22 @@
 """Phase 2 agent: answers questions with BigQuery SQL, retrying on errors."""
 
 from google.adk.agents import Agent
+from google.adk.models.base_llm import BaseLlm
 
 from tools.bigquery_tools import get_schema, run_query
 
 
-def build_sql_agent(model: str, dataset: str, max_attempts: int) -> Agent:
-    """Create the SQL agent. Model, dataset and attempt cap come from config."""
+def build_sql_agent(
+    model: str | BaseLlm, dataset: str, max_attempts: int, mode: str | None = None
+) -> Agent:
+    """Create the SQL agent. Model, dataset and attempt cap come from config.
+
+    mode="single_turn" lets the orchestrator call it like a tool (see orchestrator.py).
+    """
     return Agent(
         name="sql_agent",
         model=model,
+        mode=mode,
         description=f"Answers data questions by querying the BigQuery dataset {dataset}.",
         instruction=f"""You answer questions about the BigQuery dataset `{dataset}`.
 

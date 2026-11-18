@@ -52,15 +52,18 @@ def test_retrieve_accumulates_deduplicated_state_within_one_question(monkeypatch
     assert ctx.state[STATE_QUERIES] == ["first", "second"]
 
 
-def test_retrieve_resets_state_for_a_new_question(monkeypatch):
-    use_hits(monkeypatch, {"old": [fake_hit("a.md:c0", "a.md")], "new": [fake_hit("b.md:c0", "b.md")]})
+def test_retrieve_state_accumulates_across_invocations_in_one_session(monkeypatch):
+    # The orchestrator's revision turn is a new invocation in the same session;
+    # evidence from the draft turn must survive it.
+    use_hits(monkeypatch, {"draft": [fake_hit("a.md:c0", "a.md")], "revise": [fake_hit("b.md:c0", "b.md")]})
     state: dict = {}
 
-    retrieve("old", make_tool_context("question-1", state))
-    retrieve("new", make_tool_context("question-2", state))
+    retrieve("draft", make_tool_context("draft-turn", state))
+    retrieve("revise", make_tool_context("revision-turn", state))
 
-    assert state[STATE_SOURCES] == ["b.md"]
-    assert state[STATE_QUERIES] == ["new"]
+    assert state[STATE_SOURCES] == ["a.md", "b.md"]
+    assert state[STATE_QUERIES] == ["draft", "revise"]
+    assert [c["chunk_id"] for c in state[STATE_CHUNKS]] == ["a.md:c0", "b.md:c0"]
 
 
 def test_retrieve_returns_error_instead_of_raising(monkeypatch):

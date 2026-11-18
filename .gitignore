@@ -14,3 +14,6 @@ reference/
 
 # Local vector store and chunk index (rebuilt by make ingest)
 data/chroma/
+
+# Reports written by the save_report tool
+reports/

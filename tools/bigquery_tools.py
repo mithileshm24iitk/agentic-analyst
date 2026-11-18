@@ -5,7 +5,7 @@ Safety rules are enforced here in code, not only in the agent prompt:
   - only tables from the configured dataset
   - dry run first; reject queries that would scan too many bytes
   - LIMIT added when missing; returned rows capped
-  - a per-question cap on how many times run_query may be called
+  - a per-session (= per request) cap on how many times run_query may be called
 """
 
 import concurrent.futures
@@ -26,7 +26,7 @@ from app.config import get_settings
 STATE_ATTEMPTS = "sql_attempts"
 STATE_LAST_SQL = "last_sql"
 STATE_LAST_ROWS = "last_sql_rows"
-STATE_INVOCATION = "sql_invocation_id"
+STATE_HISTORY = "sql_history"  # every attempt: {sql, ok, error_type, rows}; evidence for the critic
 
 # Statement types that write data or change the schema. Rejected anywhere in the tree.
 FORBIDDEN_NODES = (
@@ -184,26 +184,40 @@ def run_query(sql: str, tool_context: ToolContext) -> dict:
     settings = get_settings()
     state = tool_context.state
 
-    # Attempt counter, reset at the start of each new question (invocation).
-    if state.get(STATE_INVOCATION) != tool_context.invocation_id:
-        state[STATE_INVOCATION] = tool_context.invocation_id
-        state[STATE_ATTEMPTS] = 0
-    if state[STATE_ATTEMPTS] >= settings.sql_max_attempts:
+    # Attempt counter, scoped to the session. Each API request uses a fresh session,
+    # so the cap is per request (including the orchestrator's revision turn).
+    attempts = state.get(STATE_ATTEMPTS, 0)
+    if attempts >= settings.sql_max_attempts:
         return _failure(
             f"Attempt limit reached ({settings.sql_max_attempts} queries). "
             "Do not call run_query again. Explain to the user what you tried and why it failed.",
             "attempt_limit",
         )
-    state[STATE_ATTEMPTS] = state[STATE_ATTEMPTS] + 1
-    state[STATE_LAST_SQL] = sql
-    state[STATE_LAST_ROWS] = []
+    state[STATE_ATTEMPTS] = attempts + 1
 
+    result, executed_sql = _validate_and_execute(sql, settings)
+
+    # Record the attempt (assign new values so ADK tracks the state change).
+    state[STATE_LAST_SQL] = executed_sql
+    state[STATE_LAST_ROWS] = result["rows"]
+    state[STATE_HISTORY] = state.get(STATE_HISTORY, []) + [
+        {
+            "sql": executed_sql,
+            "ok": result["ok"],
+            "error_type": result["error_type"],
+            "rows": result["rows"],
+        }
+    ]
+    return result
+
+
+def _validate_and_execute(sql: str, settings) -> tuple[dict, str]:
+    """Validate, dry-run, then run. Returns (result dict, the SQL that was checked/run)."""
     # 1. Validate.
     try:
         safe_sql = validate_sql(sql, settings.bq_dataset, settings.bq_max_rows)
     except SqlRejected as e:
-        return _failure(str(e), "validation")
-    state[STATE_LAST_SQL] = safe_sql
+        return _failure(str(e), "validation"), sql
 
     client = get_client()
     try:
@@ -218,7 +232,7 @@ def run_query(sql: str, tool_context: ToolContext) -> dict:
                 f"{settings.bq_max_bytes_billed:,}. Select fewer columns or filter more.",
                 "too_expensive",
                 estimated,
-            )
+            ), safe_sql
 
         # 3. Real run, with a hard byte cap and a timeout.
         job = client.query(
@@ -234,11 +248,10 @@ def run_query(sql: str, tool_context: ToolContext) -> dict:
     except concurrent.futures.TimeoutError:
         return _failure(
             f"Query timed out after {settings.bq_query_timeout_seconds}s. Simplify it.", "timeout"
-        )
+        ), safe_sql
     except Exception as e:  # BigQuery errors go back to the agent so it can fix the SQL
-        return _failure(str(e), "bigquery_error")
+        return _failure(str(e), "bigquery_error"), safe_sql
 
-    state[STATE_LAST_ROWS] = rows
     return {
         "ok": True,
         "rows": rows,
@@ -246,4 +259,4 @@ def run_query(sql: str, tool_context: ToolContext) -> dict:
         "error": None,
         "error_type": None,
         "bytes_processed": job.total_bytes_processed,
-    }
+    }, safe_sql

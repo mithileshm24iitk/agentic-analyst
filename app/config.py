@@ -4,6 +4,7 @@ import os
 from functools import lru_cache
 from pathlib import Path
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,6 +38,18 @@ class Settings(BaseSettings):
     chunk_overlap: int = 100  # characters
     rag_top_k: int = 5
     rrf_k: int = 60  # reciprocal rank fusion constant
+
+    # Orchestrator and critic. Empty = use worker_model.
+    orchestrator_model: str | None = None
+    critic_model: str | None = None
+    critic_max_revisions: int = 1
+    reports_dir: Path = Path("reports")
+
+    @model_validator(mode="after")
+    def _default_models_to_worker(self) -> "Settings":
+        self.orchestrator_model = self.orchestrator_model or self.worker_model
+        self.critic_model = self.critic_model or self.worker_model
+        return self
 
     def export_to_environ(self) -> None:
         """Copy the Google settings into os.environ.

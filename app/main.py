@@ -1,42 +1,98 @@
-"""FastAPI app: GET /health, POST /ask, POST /ask/sql and POST /ask/rag."""
+"""FastAPI app: GET /health, POST /ask (orchestrator), POST /ask/sql and POST /ask/rag (debugging)."""
 
+import logging
+import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
 
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Depends, FastAPI, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, StringConstraints
 
-from agents.assistant import build_assistant
+from agents.critic import build_critic
+from agents.orchestrator import build_orchestrator
 from agents.rag_agent import build_rag_agent
 from agents.sql_agent import build_sql_agent
-from app.agent_service import AgentService
+from app.agent_service import AgentResult, AgentService
 from app.config import get_settings
+from app.errors import ApiError, run_agent_safely
+from app.orchestration import AgentCritic, Orchestration, build_ask_response
 from tools.bigquery_tools import STATE_ATTEMPTS, STATE_LAST_ROWS, STATE_LAST_SQL
 from tools.rag_tools import STATE_CHUNKS, STATE_SOURCES
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """On startup: load config and build the agents once."""
-    settings = get_settings()
-    settings.export_to_environ()
-    app.state.agent_service = AgentService(build_assistant(settings.worker_model))
-    app.state.sql_service = AgentService(
-        build_sql_agent(settings.worker_model, settings.bq_dataset, settings.sql_max_attempts)
+    s = get_settings()
+    s.export_to_environ()
+    orchestrator = AgentService(
+        build_orchestrator(s.orchestrator_model, s.worker_model, s.bq_dataset, s.sql_max_attempts)
     )
-    app.state.rag_service = AgentService(build_rag_agent(settings.worker_model))
+    critic = AgentCritic(AgentService(build_critic(s.critic_model)))
+    app.state.orchestration = Orchestration(orchestrator, critic, s.critic_max_revisions)
+    app.state.sql_service = AgentService(build_sql_agent(s.worker_model, s.bq_dataset, s.sql_max_attempts))
+    app.state.rag_service = AgentService(build_rag_agent(s.worker_model))
     yield
 
 
 app = FastAPI(title="Agentic Analyst", lifespan=lifespan)
 
 
+# ---------------------------------------------------------------- request id + errors
+
+
+@app.middleware("http")
+async def add_request_id(request: Request, call_next):
+    """Give every request an id: used in error bodies and logs, returned as X-Request-ID."""
+    request.state.request_id = uuid.uuid4().hex
+    response = await call_next(request)
+    response.headers["X-Request-ID"] = request.state.request_id
+    return response
+
+
+@app.exception_handler(ApiError)
+async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"error": exc.message, "error_type": exc.error_type, "request_id": exc.request_id},
+    )
+
+
+async def run_agent(request: Request, service: Any, question: str) -> AgentResult:
+    """The single path every /ask endpoint uses to call an agent."""
+    request_id = request.state.request_id
+    result = await run_agent_safely(service.ask(question), request_id)
+    if not result.answer:
+        raise ApiError("empty_answer", request_id)
+    return result
+
+
+# ---------------------------------------------------------------- models
+
+
 class AskRequest(BaseModel):
     question: Annotated[str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4000)]
 
 
+class CriticSummary(BaseModel):
+    supported: bool | None  # None = the critic could not run
+    unsupported_claims: list[str]
+    revisions: int
+
+
 class AskResponse(BaseModel):
     answer: str
+    route: str  # docs / sql / both / none
+    agents_called: list[str]
+    sql: str | None
+    rows: list[dict[str, Any]]
+    sources: list[str]  # files of every retrieved chunk
+    cited_sources: list[str]  # files the answer actually cites (and that were retrieved)
+    critic: CriticSummary
+    saved_report: str | None
 
 
 class SqlAskResponse(BaseModel):
@@ -60,9 +116,9 @@ class RagAskResponse(BaseModel):
     chunks: list[RagChunk]  # every chunk retrieved for this question
 
 
-# Dependencies, so tests can swap in fake agents.
-def get_agent_service(request: Request) -> AgentService:
-    return request.app.state.agent_service
+# Dependencies, so tests can swap in fakes.
+def get_orchestration(request: Request) -> Orchestration:
+    return request.app.state.orchestration
 
 
 def get_sql_service(request: Request) -> AgentService:
@@ -73,6 +129,9 @@ def get_rag_service(request: Request) -> AgentService:
     return request.app.state.rag_service
 
 
+# ---------------------------------------------------------------- routes
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -81,22 +140,20 @@ def health() -> dict[str, str]:
 @app.post("/ask", response_model=AskResponse)
 async def ask(
     body: AskRequest,
-    service: Annotated[AgentService, Depends(get_agent_service)],
-) -> AskResponse:
-    result = await service.ask(body.question)
-    if not result.answer:
-        raise HTTPException(status_code=502, detail="The agent returned no answer.")
-    return AskResponse(answer=result.answer)
+    request: Request,
+    orchestration: Annotated[Orchestration, Depends(get_orchestration)],
+) -> dict[str, Any]:
+    result = await run_agent(request, orchestration, body.question)
+    return build_ask_response(result)
 
 
 @app.post("/ask/sql", response_model=SqlAskResponse)
 async def ask_sql(
     body: AskRequest,
+    request: Request,
     service: Annotated[AgentService, Depends(get_sql_service)],
 ) -> SqlAskResponse:
-    result = await service.ask(body.question)
-    if not result.answer:
-        raise HTTPException(status_code=502, detail="The SQL agent returned no answer.")
+    result = await run_agent(request, service, body.question)
     return SqlAskResponse(
         answer=result.answer,
         sql=result.state.get(STATE_LAST_SQL),
@@ -108,11 +165,10 @@ async def ask_sql(
 @app.post("/ask/rag", response_model=RagAskResponse)
 async def ask_rag(
     body: AskRequest,
+    request: Request,
     service: Annotated[AgentService, Depends(get_rag_service)],
 ) -> RagAskResponse:
-    result = await service.ask(body.question)
-    if not result.answer:
-        raise HTTPException(status_code=502, detail="The RAG agent returned no answer.")
+    result = await run_agent(request, service, body.question)
     return RagAskResponse(
         answer=result.answer,
         sources=result.state.get(STATE_SOURCES, []),

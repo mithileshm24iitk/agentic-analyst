@@ -4,11 +4,11 @@ from google.adk.tools import ToolContext
 
 from tools.retrieval.search import hybrid_search
 
-# Session state keys (read by /ask/rag, the Phase 4 orchestrator and Phase 5 metrics).
-STATE_CHUNKS = "rag_chunks"  # every chunk retrieved for the current question, deduplicated
+# Session state keys (read by /ask/rag, the orchestrator, the critic and Phase 5 metrics).
+# Scoped to the session; each API request uses a fresh session.
+STATE_CHUNKS = "rag_chunks"  # every chunk retrieved in this session, deduplicated
 STATE_SOURCES = "rag_sources"  # sorted unique source file names
 STATE_QUERIES = "rag_queries"  # the queries the agent searched with
-STATE_INVOCATION = "rag_invocation_id"
 
 
 def retrieve(query: str, tool_context: ToolContext) -> dict:
@@ -19,15 +19,8 @@ def retrieve(query: str, tool_context: ToolContext) -> dict:
     if the first results do not answer the question.
     """
     state = tool_context.state
-    # New question (invocation): start fresh lists.
-    if state.get(STATE_INVOCATION) != tool_context.invocation_id:
-        state[STATE_INVOCATION] = tool_context.invocation_id
-        state[STATE_CHUNKS] = []
-        state[STATE_SOURCES] = []
-        state[STATE_QUERIES] = []
-
     # Assign new lists (not .append) so ADK records the change in the state delta.
-    state[STATE_QUERIES] = state[STATE_QUERIES] + [query]
+    state[STATE_QUERIES] = state.get(STATE_QUERIES, []) + [query]
 
     try:
         hits = hybrid_search(query)
@@ -44,8 +37,9 @@ def retrieve(query: str, tool_context: ToolContext) -> dict:
         }
         for h in hits
     ]
-    seen = {c["chunk_id"] for c in state[STATE_CHUNKS]}
-    state[STATE_CHUNKS] = state[STATE_CHUNKS] + [c for c in chunks if c["chunk_id"] not in seen]
+    previous = state.get(STATE_CHUNKS, [])
+    seen = {c["chunk_id"] for c in previous}
+    state[STATE_CHUNKS] = previous + [c for c in chunks if c["chunk_id"] not in seen]
     state[STATE_SOURCES] = sorted({c["source"] for c in state[STATE_CHUNKS]})
 
     return {

@@ -106,15 +106,17 @@ def test_attempt_cap_stops_further_queries(fake_client):
     assert len(fake_client.calls) == calls_before  # nothing sent to BigQuery
 
 
-def test_attempt_counter_resets_for_new_question(fake_client):
+def test_attempt_counter_is_session_scoped_across_invocations(fake_client):
+    # Same session, two invocations (e.g. the orchestrator's draft and revision turns):
+    # the cap covers the whole request, it does not reset per invocation.
     state: dict = {}
-    run_query(GOOD_SQL, make_tool_context("question-1", state))
-    run_query(GOOD_SQL, make_tool_context("question-1", state))
+    run_query(GOOD_SQL, make_tool_context("draft-turn", state))
+    run_query(GOOD_SQL, make_tool_context("draft-turn", state))
 
-    result = run_query(GOOD_SQL, make_tool_context("question-2", state))
+    result = run_query(GOOD_SQL, make_tool_context("revision-turn", state))
 
-    assert result["ok"] is True
-    assert state[STATE_ATTEMPTS] == 1
+    assert result["error_type"] == "attempt_limit"
+    assert state[STATE_ATTEMPTS] == 2
 
 
 def test_rows_made_json_safe(fake_client):
@@ -154,3 +156,16 @@ def test_get_schema_error_returned_and_not_cached(fake_client):
     fake_client.error = None
     fake_client.rows = [{"table_name": "t", "column_name": "c", "data_type": "INT64"}]
     assert get_schema()["ok"] is True
+
+
+def test_every_attempt_is_recorded_in_sql_history(fake_client):
+    fake_client.rows = [{"order_id": 1}]
+    ctx = make_tool_context()
+
+    run_query("DROP TABLE x", ctx)
+    run_query(GOOD_SQL, ctx)
+
+    history = ctx.state["sql_history"]
+    assert [h["ok"] for h in history] == [False, True]
+    assert history[0]["error_type"] == "validation" and history[0]["sql"] == "DROP TABLE x"
+    assert history[1]["sql"].endswith("LIMIT 3") and history[1]["rows"] == [{"order_id": 1}]

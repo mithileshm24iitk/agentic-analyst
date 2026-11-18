@@ -1,15 +1,20 @@
 """Phase 3 agent: answers from company documents, citing the source file for each fact."""
 
 from google.adk.agents import Agent
+from google.adk.models.base_llm import BaseLlm
 
 from tools.rag_tools import retrieve
 
 
-def build_rag_agent(model: str) -> Agent:
-    """Create the RAG agent. The model comes from config."""
+def build_rag_agent(model: str | BaseLlm, mode: str | None = None) -> Agent:
+    """Create the RAG agent. The model comes from config.
+
+    mode="single_turn" lets the orchestrator call it like a tool (see orchestrator.py).
+    """
     return Agent(
         name="rag_agent",
         model=model,
+        mode=mode,
         description=(
             "Answers questions about ShopCo's policies, KPI definitions, thresholds, "
             "owners, processes and data dictionary, citing the source documents."

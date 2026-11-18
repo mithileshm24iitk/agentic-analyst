@@ -1,15 +1,17 @@
-"""API tests. They use fake agents, so no GCP access is needed."""
+"""API tests. They use fake services, so no GCP access is needed."""
 
 from fastapi.testclient import TestClient
 
 from app.agent_service import AgentResult
-from app.main import app, get_agent_service, get_rag_service, get_sql_service
+from app.main import app, get_orchestration, get_rag_service, get_sql_service
 
 # Not using `with TestClient(...)`, so the startup hook (which needs .env and GCP) does not run.
 client = TestClient(app)
 
 
-class FakeAgentService:
+class FakeService:
+    """Stands in for AgentService or Orchestration: both expose ask(question) -> AgentResult."""
+
     def __init__(self, answer: str, state: dict | None = None) -> None:
         self.answer = answer
         self.state = state or {}
@@ -20,8 +22,8 @@ class FakeAgentService:
         return AgentResult(answer=self.answer, state=self.state)
 
 
-def use_fake(answer: str, state: dict | None = None, dependency=get_agent_service) -> FakeAgentService:
-    fake = FakeAgentService(answer, state)
+def use_fake(answer: str, state: dict | None = None, dependency=get_orchestration) -> FakeService:
+    fake = FakeService(answer, state)
     app.dependency_overrides[dependency] = lambda: fake
     return fake
 
@@ -34,14 +36,49 @@ def test_health() -> None:
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json() == {"status": "ok"}
+    assert len(response.headers["X-Request-ID"]) == 32
 
 
-def test_ask_returns_agent_answer() -> None:
-    fake = use_fake("42")
-    response = client.post("/ask", json={"question": "  What is the answer?  "})
+# ---------------------------------------------------------------- /ask (orchestrator)
+
+
+def test_ask_returns_full_orchestrator_response() -> None:
+    state = {
+        "route": "both",
+        "agents_called": ["rag_agent", "sql_agent"],
+        "last_sql": "SELECT 1",
+        "last_sql_rows": [{"category": "Underwear", "return_rate": 0.109}],
+        "rag_sources": ["returns_policy.md", "shipping_sla.md"],
+        "critic_verdict": {"supported": True, "unsupported_claims": [], "error": None},
+        "revisions": 0,
+    }
+    answer = "Underwear is at 10.9% vs a 10.0% limit [returns_policy.md]."
+    fake = use_fake(answer, state)
+
+    response = client.post("/ask", json={"question": "  Which categories breach?  "})
+
     assert response.status_code == 200
-    assert response.json() == {"answer": "42"}
-    assert fake.questions == ["What is the answer?"]  # whitespace stripped
+    assert response.json() == {
+        "answer": answer,
+        "route": "both",
+        "agents_called": ["rag_agent", "sql_agent"],
+        "sql": "SELECT 1",
+        "rows": [{"category": "Underwear", "return_rate": 0.109}],
+        "sources": ["returns_policy.md", "shipping_sla.md"],
+        "cited_sources": ["returns_policy.md"],
+        "critic": {"supported": True, "unsupported_claims": [], "revisions": 0},
+        "saved_report": None,
+    }
+    assert fake.questions == ["Which categories breach?"]  # whitespace stripped
+
+
+def test_ask_out_of_scope_answer() -> None:
+    use_fake("I can only answer questions about ShopCo's documents and sales data.", {"route": "none"})
+
+    body = client.post("/ask", json={"question": "What is the weather in Paris?"}).json()
+
+    assert body["route"] == "none"
+    assert body["agents_called"] == [] and body["cited_sources"] == []
 
 
 def test_ask_rejects_empty_question() -> None:
@@ -50,10 +87,16 @@ def test_ask_rejects_empty_question() -> None:
     assert response.status_code == 422
 
 
-def test_ask_returns_502_when_agent_gives_no_answer() -> None:
+def test_ask_empty_answer_returns_clean_502() -> None:
     use_fake("")
     response = client.post("/ask", json={"question": "Hello?"})
     assert response.status_code == 502
+    body = response.json()
+    assert body["error_type"] == "empty_answer"
+    assert body["request_id"] == response.headers["X-Request-ID"]
+
+
+# ---------------------------------------------------------------- /ask/sql and /ask/rag (debugging)
 
 
 def test_ask_sql_returns_answer_sql_rows_and_attempts() -> None:
@@ -80,12 +123,7 @@ def test_ask_sql_when_agent_never_ran_a_query() -> None:
 
     response = client.post("/ask/sql", json={"question": "What is the meaning of life?"})
 
-    assert response.json() == {
-        "answer": "I could not answer that.",
-        "sql": None,
-        "rows": [],
-        "attempts": 0,
-    }
+    assert response.json() == {"answer": "I could not answer that.", "sql": None, "rows": [], "attempts": 0}
 
 
 def test_ask_rag_returns_answer_sources_and_chunks() -> None:

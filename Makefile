@@ -1,6 +1,6 @@
 PY := .venv/bin/python
 PORT ?= 8000
-Q ?= In one sentence, what is a KPI?
+Q ?= Which product categories are above their maximum acceptable return rate?
 
 .PHONY: install run test test-integration ingest ask ask-sql ask-rag
 
@@ -13,7 +13,7 @@ run:
 test:
 	$(PY) -m pytest -q
 
-# Smoke test against a running server: make ask Q="your question"
+# Orchestrator (documents + database + critic): make ask Q="your question"
 ask:
 	curl -s -X POST localhost:$(PORT)/ask -H "Content-Type: application/json" \
 		-d '{"question": "$(Q)"}'; echo
@@ -23,9 +23,10 @@ ask-sql:
 	curl -s -X POST localhost:$(PORT)/ask/sql -H "Content-Type: application/json" \
 		-d '{"question": "$(Q)"}'; echo
 
-# Real GCP tests: BigQuery (a few MB of scan) and RAG (needs make ingest; one embedding call)
+# Real GCP tests: BigQuery, RAG and the full orchestrator (needs make ingest; a few Gemini calls)
 test-integration:
-	RUN_BQ_INTEGRATION=1 RUN_RAG_INTEGRATION=1 $(PY) -m pytest -q tests/test_bigquery_integration.py tests/test_rag_integration.py
+	RUN_BQ_INTEGRATION=1 RUN_RAG_INTEGRATION=1 RUN_ORCHESTRATOR_INTEGRATION=1 $(PY) -m pytest -q \
+		tests/test_bigquery_integration.py tests/test_rag_integration.py tests/test_orchestrator_integration.py
 
 # Build the document index (ChromaDB + chunks.json). Safe to re-run.
 ingest:
