@@ -1,4 +1,7 @@
-"""Runs an ADK agent for one question and returns its final text answer."""
+"""Runs an ADK agent for one question and returns its answer plus session state."""
+
+from dataclasses import dataclass, field
+from typing import Any
 
 from google.adk.agents import BaseAgent
 from google.adk.events import Event
@@ -7,6 +10,12 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 APP_NAME = "agentic_analyst"
+
+
+@dataclass
+class AgentResult:
+    answer: str
+    state: dict[str, Any] = field(default_factory=dict)  # final session state, e.g. sql_attempts
 
 
 def final_text(events: list[Event]) -> str:
@@ -25,7 +34,7 @@ class AgentService:
         self._sessions = InMemorySessionService()
         self._runner = Runner(app_name=APP_NAME, agent=agent, session_service=self._sessions)
 
-    async def ask(self, question: str, user_id: str = "api-user") -> str:
+    async def ask(self, question: str, user_id: str = "api-user") -> AgentResult:
         session = await self._sessions.create_session(app_name=APP_NAME, user_id=user_id)
         message = types.Content(role="user", parts=[types.Part(text=question)])
         events = [
@@ -34,4 +43,9 @@ class AgentService:
                 user_id=user_id, session_id=session.id, new_message=message
             )
         ]
-        return final_text(events)
+        # Re-read the session: tools write to state during the run.
+        finished = await self._sessions.get_session(
+            app_name=APP_NAME, user_id=user_id, session_id=session.id
+        )
+        state = dict(finished.state) if finished else {}
+        return AgentResult(answer=final_text(events), state=state)

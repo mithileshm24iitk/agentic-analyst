@@ -16,6 +16,14 @@ class Settings(BaseSettings):
     google_genai_use_enterprise: bool = True
     worker_model: str
 
+    # BigQuery: queries are billed to google_cloud_project and read this dataset.
+    bq_dataset: str = "bigquery-public-data.thelook_ecommerce"
+    bq_location: str = "US"  # the public dataset lives in the US multi-region
+    bq_max_bytes_billed: int = 1_000_000_000  # 1 GB
+    bq_max_rows: int = 100
+    bq_query_timeout_seconds: int = 30
+    sql_max_attempts: int = 3
+
     def export_to_environ(self) -> None:
         """Copy the Google settings into os.environ.
 
