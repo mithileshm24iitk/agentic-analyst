@@ -50,4 +50,4 @@ Optional 10-second opener: `make smoke-prod` shows `/health` is open and that a 
 
 ## Closing line
 
-"Every answer comes with its evidence (SQL, rows, sources), a critic verdict, and a cost. It's evaluated against 40 golden questions, compared with a single-agent baseline, and the safety limits are in code, not just prompts."
+"Every answer comes with its evidence (SQL, rows, sources), a critic verdict, and a cost. It's evaluated against 48 golden questions, compared with a single-agent baseline, and the safety limits are in code, not just prompts."

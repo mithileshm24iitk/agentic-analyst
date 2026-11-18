@@ -26,7 +26,7 @@ from app.config import Settings, get_settings
 from eval.judge import JudgeFn, make_llm_judge
 from eval.report import summarize_system, write_report_and_baseline
 from eval.retrieval_eval import ABLATION_OUT, evaluate_retrieval, format_ablation_table
-from eval.scoring import is_infra_error, score_item
+from eval.scoring import JUDGED_REFUSAL_TYPES, is_infra_error, score_item
 from eval.systems import SYSTEM_DESCRIPTIONS, ask_in_process, build_system
 
 GOLDEN_PATH = Path("eval/golden.jsonl")
@@ -138,6 +138,9 @@ def estimate_run(
             "worst_breach_owner",
             "category_escalation",
         ):
+            judge_calls += 1.0
+            cost_usd += JUDGE_COST_PER_CALL_USD
+        elif include_judge and cat == "refusal" and item["check"].get("refusal_type") in JUDGED_REFUSAL_TYPES:
             judge_calls += 1.0
             cost_usd += JUDGE_COST_PER_CALL_USD
     return {

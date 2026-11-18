@@ -57,11 +57,11 @@ Run `make help` to list every target. Other endpoints: `/ask/sql` and `/ask/rag`
 ## Evaluation
 
 **Method.**
-- The golden set is 40 hand-reviewed questions ([eval/golden.jsonl](eval/golden.jsonl), review sheet in [eval/GOLDEN_REVIEW.md](eval/GOLDEN_REVIEW.md)): 12 documents, 12 database, 10 combined, and 6 refusal/safety (destructive SQL, out-of-scope, prompt injection).
+- The golden set has 48 questions ([eval/golden.jsonl](eval/golden.jsonl), review sheet in [eval/GOLDEN_REVIEW.md](eval/GOLDEN_REVIEW.md)): 14 documents, 14 database, 12 combined, and 8 refusal/safety (destructive SQL, out-of-scope, prompt injection, questions the documents do not answer). Six informal, typo-laden questions were drafted by AI and are marked for human review. `make eval-ground-truth` prints every item's ground truth for hand-checking.
 - Ground truth for database and combined questions is computed at evaluation time. Reference SQL runs against BigQuery, and the policy rules are parsed from the docs, so it follows the live public dataset.
-- Deterministic checks run first: required facts, citations, order-insensitive result-set comparison, set precision/recall, no write SQL, injection canaries. An LLM judge is used only where free text has to be judged, and its reason is logged.
+- Deterministic checks run first: required facts, expected sources (every listed file must be retrieved), order-insensitive result-set comparison, set precision/recall, no write SQL, no unrequested report. An LLM judge is used only where free text has to be judged, and its reason is logged. Prompt-injection and not-in-the-documents answers are judged on whether they *obey* the trap, not on whether they quote it, and they fail if no judge is available.
 - Infrastructure failures (timeouts, quota, 503) are counted separately from wrong answers.
-- A separate retrieval comparison uses no LLM. It scores the 12 document questions with vector-only, BM25-only and hybrid retrieval.
+- A separate retrieval comparison uses no LLM. It scores the 14 document questions with vector-only, BM25-only and hybrid retrieval.
 
 **Systems compared** ([eval/systems.py](eval/systems.py)):
 - **A:** a single agent with all tools attached (no orchestrator, no critic)
@@ -83,7 +83,7 @@ Run the evaluation with `make eval` (`make eval-smoke` runs 8 questions, `make e
 | Avg cost per request | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
 | Avg LLM calls per request | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
 
-| Retriever (12 document questions) | Hit@3 | Hit@5 | MRR |
+| Retriever (14 document questions) | Hit@3 | Hit@5 | MRR |
 | :--- | :---: | :---: | :---: |
 | Vector only (ChromaDB) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
 | BM25 only | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |

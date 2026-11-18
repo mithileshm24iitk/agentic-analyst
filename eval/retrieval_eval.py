@@ -1,11 +1,11 @@
 """Retrieval evaluation (Phase 6 item 2): no LLM needed.
 
-For the 12 document questions in eval/golden.jsonl, evaluates three retrievers:
+For every document question in eval/golden.jsonl, evaluates three retrievers:
   1. vector_only (ChromaDB cosine distance)
   2. bm25_only (BM25Okapi keyword search)
   3. hybrid (Reciprocal Rank Fusion of vector + BM25)
 
-Computes hit@3, hit@5 (whether any expected source file is in the top k results)
+Computes hit@3, hit@5 (whether ALL expected source files are in the top k results)
 and MRR (Mean Reciprocal Rank of the first chunk from an expected source file),
 prints an ablation table, and saves the results to eval/results/retrieval_ablation.json.
 """
@@ -25,9 +25,12 @@ ABLATION_OUT = Path("eval/results/retrieval_ablation.json")
 
 
 def hit_at_k(ranked_sources: list[str], expected_sources: list[str], k: int) -> float:
-    """1.0 if at least one expected source appears in ranked_sources[:k], else 0.0."""
-    wanted = set(expected_sources)
-    return 1.0 if any(src in wanted for src in ranked_sources[:k]) else 0.0
+    """1.0 if ALL expected sources appear in ranked_sources[:k], else 0.0.
+
+    Same meaning of expected_sources as in eval/scoring.py: every listed file is needed.
+    """
+    top = set(ranked_sources[:k])
+    return 1.0 if expected_sources and all(src in top for src in expected_sources) else 0.0
 
 
 def reciprocal_rank(ranked_sources: list[str], expected_sources: list[str]) -> float:
