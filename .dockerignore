@@ -1,0 +1,18 @@
+# Docker build context = allow-list. Everything is excluded except what the image needs,
+# so a new local file (a key, a dataset, a report) can never slip into the image.
+*
+
+# Included: runtime code, pinned runtime dependencies, and the pre-built retrieval index
+# (data/chroma = chroma.sqlite3 + its segment folder + chunks.json).
+!requirements.txt
+!app
+!agents
+!tools
+!data/chroma
+
+# Never in the image, even inside the folders above. Listed for clarity: the allow-list
+# already excludes .env, .venv, reference/, reports/, data/metrics/, tests/, eval/, .git.
+**/__pycache__
+**/*.pyc
+**/.env
+**/*.tmp

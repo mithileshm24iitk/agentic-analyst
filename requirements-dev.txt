@@ -1,0 +1,3 @@
+# Local development and CI: runtime + test tools (not installed in the Docker image).
+-r requirements.txt
+pytest==9.2.0

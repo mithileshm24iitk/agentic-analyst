@@ -1,0 +1,19 @@
+# Files uploaded to Cloud Build by scripts/deploy.sh (gcloud builds submit).
+# Without this file gcloud would fall back to .gitignore, which excludes data/chroma,
+# and the image would ship without the retrieval index.
+# Same allow-list as .dockerignore, plus the two files Cloud Build needs to run docker build.
+/*
+!/Dockerfile
+!/.dockerignore
+!/requirements.txt
+!/app/
+!/agents/
+!/tools/
+!/data/
+/data/*
+!/data/chroma/
+
+**/__pycache__/
+**/*.pyc
+**/.env
+**/*.tmp

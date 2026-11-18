@@ -13,6 +13,25 @@ from tools.retrieval.ingest import IngestReport, ingest
 DATASET = "bigquery-public-data.thelook_ecommerce"
 
 
+@pytest.fixture(autouse=True)
+def app_state_defaults():
+    """Values the startup hook normally sets. Most API tests skip startup (it needs GCP).
+
+    No API key = development mode (open API); test_auth.py sets a key itself.
+    Tests may assign app.state values directly: the whole state is restored afterwards.
+    (Not monkeypatch: it cannot patch the same app.state key twice in one test, because
+    Starlette keeps state in a private dict rather than the instance __dict__.)
+    """
+    from app.main import app
+
+    saved = dict(app.state._state)
+    app.state.api_key = None
+    app.state.max_question_chars = 2000
+    yield
+    app.state._state.clear()
+    app.state._state.update(saved)
+
+
 @pytest.fixture
 def settings(monkeypatch) -> Settings:
     """Test settings, independent of the real .env file."""

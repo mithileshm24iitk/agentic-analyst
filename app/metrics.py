@@ -9,6 +9,8 @@ land in the same RequestMetrics.
 """
 
 import json
+import logging
+import sys
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -180,6 +182,33 @@ def append_record(path: Path, record: dict[str, Any]) -> None:
         with _write_lock, path.open("a", encoding="utf-8") as f:
             f.write(line + "\n")
     except OSError:
-        import logging
-
         logging.getLogger(__name__).exception("request_id=%s could not write metrics", record.get("request_id"))
+
+
+LOG_TYPE = "request_metrics"  # filter in Cloud Logging: jsonPayload.log_type="request_metrics"
+
+
+def log_record(record: dict[str, Any], stream=None) -> None:
+    """Print the record as one JSON line on stdout. Never raises.
+
+    On Cloud Run every stdout line that is a single JSON object becomes a structured
+    log entry (jsonPayload) in Cloud Logging; "severity" and "message" are special
+    fields. Unlike the JSONL file, these lines survive the instance and cover all instances.
+    """
+    entry = {
+        **record,
+        "severity": "INFO" if record.get("status") == "ok" else "WARNING",
+        "message": (
+            f"{LOG_TYPE} {record.get('endpoint')} status={record.get('status')} "
+            f"route={record.get('route')} latency_ms={record.get('latency_ms')}"
+        ),
+        "log_type": LOG_TYPE,
+    }
+    try:
+        line = json.dumps(entry, default=str, ensure_ascii=False)
+        out = stream or sys.stdout
+        with _write_lock:  # one whole line per request, never interleaved
+            out.write(line + "\n")
+            out.flush()
+    except Exception:
+        logging.getLogger(__name__).exception("request_id=%s could not log metrics", record.get("request_id"))

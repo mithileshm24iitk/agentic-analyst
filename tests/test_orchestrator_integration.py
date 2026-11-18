@@ -10,6 +10,7 @@ import os
 import pytest
 from fastapi.testclient import TestClient
 
+from app.config import get_settings
 from app.main import app
 
 pytestmark = pytest.mark.skipif(
@@ -20,7 +21,9 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def client():
-    with TestClient(app) as c:  # `with` runs the startup hook, which builds the real agents
+    s = get_settings()
+    headers = {"X-API-Key": s.api_key.get_secret_value()} if s.api_key else {}
+    with TestClient(app, headers=headers) as c:  # `with` runs the startup hook: real agents
         yield c
 
 

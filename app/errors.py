@@ -37,6 +37,8 @@ def current_request_id() -> str:
 
 # error_type -> (HTTP status, message shown to the client). Details stay in the logs.
 ERRORS: dict[str, tuple[int, str]] = {
+    "unauthorized": (401, "Missing or invalid API key. Send it in the X-API-Key header."),
+    "question_too_long": (422, "The question is too long."),
     "quota_exceeded": (503, "An upstream quota or rate limit was reached. Try again in a minute."),
     "timeout": (503, "An upstream service took too long to respond. Try again."),
     "upstream_unavailable": (503, "An upstream service is temporarily unavailable. Try again."),
@@ -50,9 +52,10 @@ _TIMEOUTS = (TimeoutError, asyncio.TimeoutError, concurrent.futures.TimeoutError
 
 
 class ApiError(Exception):
-    def __init__(self, error_type: str, request_id: str) -> None:
+    def __init__(self, error_type: str, request_id: str, message: str | None = None) -> None:
         self.error_type = error_type
-        self.status_code, self.message = ERRORS[error_type]
+        self.status_code, default_message = ERRORS[error_type]
+        self.message = message or default_message  # only ever our own text, never exception details
         self.request_id = request_id
         super().__init__(self.message)
 

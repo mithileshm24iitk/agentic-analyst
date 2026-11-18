@@ -6,7 +6,7 @@ from pathlib import Path
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, SecretStr, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -30,10 +30,14 @@ DEFAULT_MODEL_PRICES: dict[str, ModelPrice | None] = {
 }
 
 
+MIN_API_KEY_CHARS = 32  # `openssl rand -hex 32` gives 64
+
+
 class Settings(BaseSettings):
     """All config lives here. Values come from env vars or .env (env vars win)."""
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # hide_input_in_errors: a validation error must never print API_KEY into the logs.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     google_cloud_project: str
     google_cloud_location: str
@@ -66,6 +70,16 @@ class Settings(BaseSettings):
     critic_model: str | None = None
     critic_max_revisions: int = 1
     reports_dir: Path = Path("reports")
+    # Set on Cloud Run: save_report writes to this Cloud Storage bucket instead of reports_dir.
+    reports_bucket: str | None = None
+
+    # Deployment and security.
+    # production = API_KEY is required (the app refuses to start without one).
+    # development = API_KEY is optional; without it the API is open (local use only).
+    app_env: Literal["development", "production"] = "development"
+    # Clients send it in the X-API-Key header. On Cloud Run it comes from Secret Manager.
+    api_key: SecretStr | None = None
+    max_question_chars: int = Field(default=2000, gt=0)
 
     # Timeouts. One model or embedding HTTP call, and one whole API request
     # (kept under Cloud Run's default 300s so we answer with clean JSON first).
@@ -94,6 +108,21 @@ class Settings(BaseSettings):
         self.orchestrator_model = self.orchestrator_model or self.worker_model
         self.critic_model = self.critic_model or self.worker_model
         self.judge_model = self.judge_model or self.worker_model
+        return self
+
+    @model_validator(mode="after")
+    def _check_security(self) -> "Settings":
+        # "API_KEY=" or "REPORTS_BUCKET=" in .env means "not set". A trailing newline
+        # (e.g. a secret created with `echo`) would make every real key fail, so trim it.
+        if self.api_key is not None:
+            key = self.api_key.get_secret_value().strip()
+            self.api_key = SecretStr(key) if key else None
+        self.reports_bucket = self.reports_bucket or None
+        if self.app_env == "production":
+            if self.api_key is None:
+                raise ValueError("APP_ENV=production requires API_KEY. Refusing to start without it.")
+            if len(self.api_key.get_secret_value()) < MIN_API_KEY_CHARS:
+                raise ValueError(f"API_KEY must be at least {MIN_API_KEY_CHARS} characters in production.")
         return self
 
     def export_to_environ(self) -> None:

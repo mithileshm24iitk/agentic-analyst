@@ -125,7 +125,8 @@ def run() -> None:
     genai_logger.setLevel(logging.INFO)
 
     results: list[dict[str, Any]] = []
-    with TestClient(app) as client:  # `with` runs the startup hook: real agents
+    headers = {"X-API-Key": settings.api_key.get_secret_value()} if settings.api_key else {}
+    with TestClient(app, headers=headers) as client:  # `with` runs the startup hook: real agents
         for key, question, check in QUESTIONS:
             for n in range(1, settings.bench_runs + 1):
                 started = time.perf_counter()

@@ -1,6 +1,8 @@
+# Runtime dependencies (installed in the Docker image). Pinned.
 google-adk==2.14.1
 google-genai==2.34.0
 google-cloud-bigquery==3.47.0
+google-cloud-storage==3.17.1
 sqlglot==30.33.0
 chromadb==1.5.9
 rank-bm25==0.2.2
@@ -11,7 +13,5 @@ fastapi==0.165.0
 uvicorn[standard]==0.54.0
 pydantic==2.14.3
 pydantic-settings==2.16.3
-
-# Testing
-pytest==9.2.0
+# Imported directly by app/errors.py (also used by FastAPI's TestClient).
 httpx==0.28.1

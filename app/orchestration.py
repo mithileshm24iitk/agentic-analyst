@@ -60,8 +60,8 @@ def revision_message(verdict: dict[str, Any]) -> str:
         f"<unsupported_claims>\n{claims or '- (not specified)'}\n</unsupported_claims>\n\n"
         "Rewrite your answer. Remove or correct these claims using only evidence from the "
         "specialists. Return the complete revised answer. If you already saved a report in "
-        "this conversation, call save_report again with the corrected content; it updates "
-        "the same file."
+        "this conversation, call save_report again with the corrected content; it saves the "
+        "corrected version of the same report."
     )
 
 
