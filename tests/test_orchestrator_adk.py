@@ -166,3 +166,52 @@ def test_out_of_scope_question_calls_no_agents(fake_backends):
     assert body["route"] == "none"
     assert body["agents_called"] == []
     assert body["sql"] is None and body["sources"] == []
+
+
+def test_tools_run_off_the_event_loop_thread_with_request_id(monkeypatch, fake_backends):
+    """Sync tools run in ADK's thread pool (not blocking the loop) and still see the request id."""
+    import threading
+
+    from app.errors import current_request_id, set_request_id
+
+    seen = {}
+
+    def recording_search(query):
+        seen["thread"] = threading.current_thread()
+        seen["request_id"] = current_request_id()
+        return [CHUNK]
+
+    monkeypatch.setattr(rag_tools, "hybrid_search", recording_search)
+    orchestrator = build_orchestrator(
+        model=ScriptedLlm(script=[("rag_agent", {"request": "limit?"}), "10.0% [returns_policy.md]."]),
+        worker_model=ScriptedLlm(script=[("retrieve", {"query": "limit"}), "10.0% [returns_policy.md]."]),
+        dataset=DATASET,
+        sql_max_attempts=2,
+    )
+
+    async def flow():
+        set_request_id("req-123")
+        loop_thread = threading.current_thread()
+        await AgentService(orchestrator).ask("limit?")
+        return loop_thread
+
+    loop_thread = asyncio.run(flow())
+
+    assert seen["thread"] is not loop_thread
+    assert seen["request_id"] == "req-123"
+
+
+def test_agent_service_deletes_its_session(fake_backends):
+    service = AgentService(
+        build_orchestrator(
+            model=ScriptedLlm(script=["Out of scope."]), worker_model=ScriptedLlm(script=[]),
+            dataset=DATASET, sql_max_attempts=2,
+        )
+    )
+
+    async def flow():
+        await service.ask("weather?")
+        listed = await service._sessions.list_sessions(app_name="agentic_analyst", user_id="api-user")
+        return listed.sessions
+
+    assert asyncio.run(flow()) == []

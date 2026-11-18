@@ -7,6 +7,7 @@ from app.main import app, get_orchestration, get_rag_service, get_sql_service
 
 # Not using `with TestClient(...)`, so the startup hook (which needs .env and GCP) does not run.
 client = TestClient(app)
+app.state.request_timeout_seconds = 5  # normally set by the startup hook
 
 
 class FakeService:

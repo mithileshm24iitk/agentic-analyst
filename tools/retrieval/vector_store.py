@@ -1,5 +1,6 @@
 """ChromaDB persistent vector store. We pass embeddings in ourselves (no Chroma embedder)."""
 
+from functools import lru_cache
 from pathlib import Path
 
 import chromadb
@@ -8,10 +9,14 @@ from chromadb.config import Settings as ChromaSettings
 
 
 def get_client(chroma_dir: Path) -> chromadb.ClientAPI:
-    chroma_dir.mkdir(parents=True, exist_ok=True)
-    return chromadb.PersistentClient(
-        path=str(chroma_dir), settings=ChromaSettings(anonymized_telemetry=False)
-    )
+    """One client per folder, reused across searches (cheaper than re-opening each time)."""
+    return _client_for(str(chroma_dir.resolve()))
+
+
+@lru_cache
+def _client_for(path: str) -> chromadb.ClientAPI:
+    Path(path).mkdir(parents=True, exist_ok=True)
+    return chromadb.PersistentClient(path=path, settings=ChromaSettings(anonymized_telemetry=False))
 
 
 def open_collection(chroma_dir: Path, name: str, model: str, dim: int) -> Collection:

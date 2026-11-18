@@ -9,6 +9,7 @@ from google import genai
 from google.genai import errors, types
 
 from app.config import get_settings
+from app.errors import current_request_id
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +30,23 @@ class Embedder(Protocol):
 class GeminiEmbedder:
     """Gemini embeddings on Vertex AI, batched, with retries on 429/503."""
 
-    def __init__(self, model: str, project: str, location: str, dim: int, batch_size: int) -> None:
+    def __init__(
+        self,
+        model: str,
+        project: str,
+        location: str,
+        dim: int,
+        batch_size: int,
+        timeout_seconds: int | None = None,
+    ) -> None:
         self.model = model
         self.dim = dim
         self.batch_size = batch_size
-        self._client = genai.Client(vertexai=True, project=project, location=location)
+        # google-genai has no timeout by default; without one a stuck call hangs the request.
+        http_options = types.HttpOptions(timeout=timeout_seconds * 1000) if timeout_seconds else None
+        self._client = genai.Client(
+            vertexai=True, project=project, location=location, http_options=http_options
+        )
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         vectors: list[list[float]] = []
@@ -57,7 +70,10 @@ class GeminiEmbedder:
                 if e.code not in RETRYABLE_STATUS or attempt == MAX_TRIES:
                     raise
                 delay = BASE_DELAY_S * 2 ** (attempt - 1)
-                logger.warning("Embedding HTTP %s, retry %d/%d in %.0fs", e.code, attempt, MAX_TRIES, delay)
+                logger.warning(
+                    "request_id=%s embedding HTTP %s, retry %d/%d in %.0fs",
+                    current_request_id(), e.code, attempt, MAX_TRIES, delay,
+                )
                 _sleep(delay)
         vectors = [list(e.values) for e in response.embeddings]
         if len(vectors) != len(texts):
@@ -76,4 +92,5 @@ def get_embedder() -> GeminiEmbedder:
         location=s.embedding_location,
         dim=s.embedding_dim,
         batch_size=s.embedding_batch_size,
+        timeout_seconds=s.llm_timeout_seconds,
     )

@@ -136,8 +136,8 @@ def test_get_schema_groups_columns_and_caches(fake_client):
         {"table_name": "users", "column_name": "id", "data_type": "INT64"},
     ]
 
-    first = get_schema()
-    second = get_schema()
+    first = get_schema(make_tool_context())
+    second = get_schema(make_tool_context())
 
     assert first["ok"] is True
     assert first["tables"] == {
@@ -151,11 +151,11 @@ def test_get_schema_groups_columns_and_caches(fake_client):
 
 def test_get_schema_error_returned_and_not_cached(fake_client):
     fake_client.error = BadRequest("boom")
-    assert get_schema()["ok"] is False
+    assert get_schema(make_tool_context())["ok"] is False
 
     fake_client.error = None
     fake_client.rows = [{"table_name": "t", "column_name": "c", "data_type": "INT64"}]
-    assert get_schema()["ok"] is True
+    assert get_schema(make_tool_context())["ok"] is True
 
 
 def test_every_attempt_is_recorded_in_sql_history(fake_client):
@@ -169,3 +169,58 @@ def test_every_attempt_is_recorded_in_sql_history(fake_client):
     assert [h["ok"] for h in history] == [False, True]
     assert history[0]["error_type"] == "validation" and history[0]["sql"] == "DROP TABLE x"
     assert history[1]["sql"].endswith("LIMIT 3") and history[1]["rows"] == [{"order_id": 1}]
+
+
+def test_failed_follow_up_query_keeps_last_successful_sql_and_rows(fake_client):
+    fake_client.rows = [{"order_id": 1}]
+    ctx = make_tool_context()
+
+    run_query(GOOD_SQL, ctx)
+    run_query("DROP TABLE x", ctx)  # second attempt fails
+
+    assert ctx.state[STATE_LAST_SQL].startswith("SELECT order_id")
+    assert ctx.state[STATE_LAST_ROWS] == [{"order_id": 1}]
+    assert [h["ok"] for h in ctx.state["sql_history"]] == [True, False]
+
+
+def test_no_last_sql_when_nothing_succeeded(fake_client):
+    ctx = make_tool_context()
+    run_query("DROP TABLE x", ctx)
+    assert STATE_LAST_SQL not in ctx.state
+
+
+def test_auth_error_is_fatal_and_recorded(fake_client):
+    from google.api_core.exceptions import Forbidden
+
+    fake_client.error = Forbidden("Access Denied: user does not have bigquery.jobs.create")
+    ctx = make_tool_context()
+
+    result = run_query(GOOD_SQL, ctx)
+
+    assert result["ok"] is False
+    assert result["error_type"] == "auth_error"
+    assert "Do not retry" in result["error"]
+    assert ctx.state["upstream_error"] == {"error_type": "auth_error", "tool": "run_query"}
+
+
+def test_quota_error_in_get_schema_is_fatal_and_recorded(fake_client):
+    from google.api_core.exceptions import TooManyRequests
+
+    fake_client.error = TooManyRequests("Quota exceeded")
+    ctx = make_tool_context()
+
+    result = get_schema(ctx)
+
+    assert result["error_type"] == "quota_exceeded"
+    assert ctx.state["upstream_error"]["tool"] == "get_schema"
+
+
+def test_ordinary_bigquery_error_is_not_fatal(fake_client):
+    fake_client.error = BadRequest("Unrecognized name: ordr_id")
+    ctx = make_tool_context()
+
+    result = run_query(GOOD_SQL, ctx)
+
+    assert result["error_type"] == "bigquery_error"
+    assert "ordr_id" in result["error"]  # the agent needs the real message to fix its SQL
+    assert "upstream_error" not in ctx.state

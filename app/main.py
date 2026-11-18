@@ -15,10 +15,11 @@ from agents.rag_agent import build_rag_agent
 from agents.sql_agent import build_sql_agent
 from app.agent_service import AgentResult, AgentService
 from app.config import get_settings
-from app.errors import ApiError, run_agent_safely
+from app.errors import ApiError, run_agent_safely, set_request_id
 from app.orchestration import AgentCritic, Orchestration, build_ask_response
 from tools.bigquery_tools import STATE_ATTEMPTS, STATE_LAST_ROWS, STATE_LAST_SQL
 from tools.rag_tools import STATE_CHUNKS, STATE_SOURCES
+from tools.upstream import STATE_UPSTREAM_ERROR
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -28,13 +29,19 @@ async def lifespan(app: FastAPI):
     """On startup: load config and build the agents once."""
     s = get_settings()
     s.export_to_environ()
+    app.state.request_timeout_seconds = s.request_timeout_seconds
+    timeout = s.llm_timeout_seconds
     orchestrator = AgentService(
-        build_orchestrator(s.orchestrator_model, s.worker_model, s.bq_dataset, s.sql_max_attempts)
+        build_orchestrator(
+            s.orchestrator_model, s.worker_model, s.bq_dataset, s.sql_max_attempts, timeout_seconds=timeout
+        )
     )
-    critic = AgentCritic(AgentService(build_critic(s.critic_model)))
+    critic = AgentCritic(AgentService(build_critic(s.critic_model, timeout_seconds=timeout)))
     app.state.orchestration = Orchestration(orchestrator, critic, s.critic_max_revisions)
-    app.state.sql_service = AgentService(build_sql_agent(s.worker_model, s.bq_dataset, s.sql_max_attempts))
-    app.state.rag_service = AgentService(build_rag_agent(s.worker_model))
+    app.state.sql_service = AgentService(
+        build_sql_agent(s.worker_model, s.bq_dataset, s.sql_max_attempts, timeout_seconds=timeout)
+    )
+    app.state.rag_service = AgentService(build_rag_agent(s.worker_model, timeout_seconds=timeout))
     yield
 
 
@@ -48,6 +55,7 @@ app = FastAPI(title="Agentic Analyst", lifespan=lifespan)
 async def add_request_id(request: Request, call_next):
     """Give every request an id: used in error bodies and logs, returned as X-Request-ID."""
     request.state.request_id = uuid.uuid4().hex
+    set_request_id(request.state.request_id)  # for logs in tools, critic and embeddings
     response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
     return response
@@ -64,7 +72,14 @@ async def api_error_handler(request: Request, exc: ApiError) -> JSONResponse:
 async def run_agent(request: Request, service: Any, question: str) -> AgentResult:
     """The single path every /ask endpoint uses to call an agent."""
     request_id = request.state.request_id
-    result = await run_agent_safely(service.ask(question), request_id)
+    result = await run_agent_safely(
+        service.ask(question), request_id, request.app.state.request_timeout_seconds
+    )
+    # A tool hit an auth or quota error and told the agent to stop: report that
+    # failure instead of a 200 answer that only says the data is unavailable.
+    upstream = result.state.get(STATE_UPSTREAM_ERROR)
+    if upstream:
+        raise ApiError(upstream["error_type"], request_id)
     if not result.answer:
         raise ApiError("empty_answer", request_id)
     return result

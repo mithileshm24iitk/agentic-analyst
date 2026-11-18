@@ -180,3 +180,45 @@ def test_category_question_retrieves_that_categorys_threshold(shopco_index, cate
         f"no top-{shopco_index.rag_top_k} chunk contains the {category} threshold: "
         f"{[h['chunk_id'] for h in hits]}"
     )
+
+
+# ---------------------------------------------------------------- vector and BM25 disagree
+
+
+class TopicEmbedder:
+    """Vectors chosen per document so vector search and BM25 rank differently."""
+
+    VECTORS = {
+        "Sem": [1.0, 0.0, 0.0],  # same meaning as the query, but no shared words
+        "Both": [0.8, 0.6, 0.0],  # close in meaning AND shares words
+        "Filler": [0.0, 1.0, 0.0],
+        "Kw": [-1.0, 0.0, 0.0],  # keyword-stuffed, opposite meaning
+    }
+
+    def _vector(self, text: str) -> list[float]:
+        heading = text.split("\n", 1)[0]
+        return self.VECTORS.get(heading, [1.0, 0.0, 0.0])  # the query maps to [1, 0, 0]
+
+    def embed_documents(self, texts):
+        return [self._vector(t) for t in texts]
+
+    def embed_query(self, text):
+        return [1.0, 0.0, 0.0]
+
+
+def test_hybrid_search_fuses_disagreeing_rankings(rag_settings):
+    write_doc(rag_settings, "sem.md", "# Sem\n\nGarments may be sent back within thirty days.")
+    write_doc(rag_settings, "both.md", "# Both\n\nReturn window is thirty days.")
+    write_doc(rag_settings, "filler.md", "# Filler\n\nShipping takes five days.")
+    write_doc(rag_settings, "kw.md", "# Kw\n\nReturn policy window. Return policy window.")
+    run_ingest(rag_settings, TopicEmbedder())
+
+    hits = hybrid_search("return policy window", k=4, embedder=TopicEmbedder(), settings=rag_settings)
+    by_source = {h["source"]: h for h in hits}
+
+    # The two retrievers disagree about what is best...
+    assert by_source["sem.md"]["vector_rank"] == 1 and by_source["sem.md"]["bm25_rank"] is None
+    assert by_source["kw.md"]["bm25_rank"] == 1 and by_source["kw.md"]["vector_rank"] == 4
+    # ...and RRF puts the chunk that both rank 2nd on top.
+    assert by_source["both.md"]["vector_rank"] == 2 and by_source["both.md"]["bm25_rank"] == 2
+    assert [h["source"] for h in hits] == ["both.md", "kw.md", "sem.md", "filler.md"]

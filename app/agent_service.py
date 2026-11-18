@@ -4,6 +4,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from google.adk.agents import BaseAgent
+from google.adk.agents.run_config import RunConfig, ToolThreadPoolConfig
 from google.adk.events import Event, EventActions
 from google.adk.runners import Runner
 from google.adk.sessions import InMemorySessionService
@@ -11,6 +12,10 @@ from google.genai import types
 
 APP_NAME = "agentic_analyst"
 USER_ID = "api-user"
+
+# Run synchronous tools (BigQuery, embeddings, Chroma, file writes) in ADK's thread
+# pool instead of on the event loop, so one slow tool does not freeze other requests.
+RUN_CONFIG = RunConfig(tool_thread_pool_config=ToolThreadPoolConfig())
 
 
 @dataclass
@@ -59,10 +64,14 @@ class AgentService:
         events = [
             event
             async for event in self._runner.run_async(
-                user_id=USER_ID, session_id=session_id, new_message=content
+                user_id=USER_ID, session_id=session_id, new_message=content, run_config=RUN_CONFIG
             )
         ]
         return final_text(events, author=self.agent.name)
+
+    async def delete_session(self, session_id: str) -> None:
+        """Free a finished session (in-memory sessions are never cleaned up otherwise)."""
+        await self._sessions.delete_session(app_name=APP_NAME, user_id=USER_ID, session_id=session_id)
 
     async def get_state(self, session_id: str) -> dict[str, Any]:
         session = await self._sessions.get_session(
@@ -84,5 +93,8 @@ class AgentService:
 
     async def ask(self, question: str) -> AgentResult:
         session_id = await self.start_session()
-        answer = await self.run_turn(session_id, question)
-        return AgentResult(answer=answer, state=await self.get_state(session_id))
+        try:
+            answer = await self.run_turn(session_id, question)
+            return AgentResult(answer=answer, state=await self.get_state(session_id))
+        finally:
+            await self.delete_session(session_id)

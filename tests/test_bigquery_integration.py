@@ -17,7 +17,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def test_schema_and_query_against_real_bigquery():
-    schema = bigquery_tools.get_schema()
+    schema = bigquery_tools.get_schema(make_tool_context())
     assert schema["ok"] is True, schema
     assert "orders" in schema["tables"]
 

@@ -15,6 +15,7 @@ from app.errors import classify
 from app.main import app, get_orchestration, get_rag_service, get_sql_service
 
 client = TestClient(app)
+app.state.request_timeout_seconds = 5  # normally set by the startup hook
 
 
 def genai_error(code: int) -> genai_errors.APIError:
@@ -32,6 +33,7 @@ def genai_error(code: int) -> genai_errors.APIError:
         (genai_error(404), "upstream_error"),
         (genai_error(500), "upstream_unavailable"),
         (genai_error(503), "upstream_unavailable"),
+        (genai_error(504), "timeout"),  # Vertex enforces our X-Server-Timeout this way
         (gcp.TooManyRequests("bq quota"), "quota_exceeded"),
         (gcp.ResourceExhausted("quota"), "quota_exceeded"),
         (gcp.Forbidden("no access"), "auth_error"),
@@ -102,3 +104,45 @@ def test_failure_is_logged_with_traceback_and_request_id(caplog):
     record = next(r for r in caplog.records if request_id in r.getMessage())
     assert record.exc_info is not None  # full traceback attached
     assert "quota_exceeded" in record.getMessage()
+
+
+class ResultService:
+    def __init__(self, state: dict, answer: str = "The data source is unavailable.") -> None:
+        self.state, self.answer = state, answer
+
+    async def ask(self, question: str):
+        from app.agent_service import AgentResult
+
+        return AgentResult(answer=self.answer, state=self.state)
+
+
+@pytest.mark.parametrize("error_type, status", [("auth_error", 502), ("quota_exceeded", 503)])
+def test_fatal_tool_error_in_state_returns_clean_error_not_200(error_type, status):
+    state = {"upstream_error": {"error_type": error_type, "tool": "run_query"}}
+    app.dependency_overrides[get_orchestration] = lambda: ResultService(state)
+
+    response = client.post("/ask", json={"question": "anything"})
+
+    assert response.status_code == status
+    assert response.json()["error_type"] == error_type
+
+
+class SlowService:
+    async def ask(self, question: str):
+        await asyncio.sleep(5)
+
+
+def test_request_timeout_returns_clean_503(monkeypatch):
+    monkeypatch.setattr(app.state, "request_timeout_seconds", 0.05)
+    app.dependency_overrides[get_sql_service] = lambda: SlowService()
+
+    response = client.post("/ask/sql", json={"question": "anything"})
+
+    assert response.status_code == 503
+    assert response.json()["error_type"] == "timeout"
+
+
+def test_aiohttp_connection_error_is_upstream_unavailable():
+    import aiohttp
+
+    assert classify(aiohttp.ClientConnectionError("reset")) == "upstream_unavailable"

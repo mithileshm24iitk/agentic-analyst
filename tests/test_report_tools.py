@@ -1,6 +1,7 @@
 """save_report path safety. Writes only to a temporary folder."""
 
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -33,10 +34,10 @@ def test_slugify_allows_only_safe_characters(title, slug):
 def test_report_always_lands_directly_inside_reports_dir(tmp_path, title):
     reports = tmp_path / "reports"
 
-    path = write_report(reports, title, "body", now=NOW)
+    name = write_report(reports, title, "body", now=NOW)
 
-    assert path.parent == reports.resolve()
-    assert path.suffix == ".md"
+    assert (reports / name).is_file()
+    assert "/" not in name and name.endswith(".md")
     assert list(tmp_path.iterdir()) == [reports]  # nothing written next to the folder
 
 
@@ -44,29 +45,29 @@ def test_same_title_same_second_never_overwrites(tmp_path):
     first = write_report(tmp_path, "Weekly", "first", now=NOW)
     second = write_report(tmp_path, "Weekly", "second", now=NOW)
 
-    assert first.name == "weekly-20261119-123000.md"
-    assert second.name == "weekly-20261119-123000-2.md"
-    assert "first" in first.read_text() and "second" in second.read_text()
+    assert first == "weekly-20261119-123000.md"
+    assert second == "weekly-20261119-123000-2.md"
+    assert "first" in (tmp_path / first).read_text() and "second" in (tmp_path / second).read_text()
 
 
 def test_existing_file_is_not_overwritten(tmp_path):
     existing = tmp_path / "weekly-20261119-123000.md"
     existing.write_text("precious")
 
-    path = write_report(tmp_path, "Weekly", "new", now=NOW)
+    name = write_report(tmp_path, "Weekly", "new", now=NOW)
 
     assert existing.read_text() == "precious"
-    assert path != existing
+    assert name != existing.name
 
 
 def test_report_content_has_title_heading(tmp_path):
-    path = write_report(tmp_path, "Return breaches", "Underwear is at 10.9%.", now=NOW)
-    assert path.read_text() == "# Return breaches\n\nUnderwear is at 10.9%.\n"
+    name = write_report(tmp_path, "Return breaches", "Underwear is at 10.9%.", now=NOW)
+    assert (tmp_path / name).read_text() == "# Return breaches\n\nUnderwear is at 10.9%.\n"
 
 
 def test_no_duplicate_heading_when_content_has_one(tmp_path):
-    path = write_report(tmp_path, "Return breaches", "# Underwear Check\n\nBody.", now=NOW)
-    assert path.read_text() == "# Underwear Check\n\nBody.\n"
+    name = write_report(tmp_path, "Return breaches", "# Underwear Check\n\nBody.", now=NOW)
+    assert (tmp_path / name).read_text() == "# Underwear Check\n\nBody.\n"
 
 
 def test_too_long_content_rejected(tmp_path):
@@ -81,7 +82,7 @@ def test_save_report_tool_returns_path_and_records_state(tmp_path, monkeypatch, 
     result = save_report("Breaches", "Five categories breach.", ctx)
 
     assert result["ok"] is True
-    assert result["path"].startswith(str(tmp_path.resolve()))
+    assert result["path"] == str(tmp_path / Path(result["path"]).name)  # relative to REPORTS_DIR
     assert ctx.state[STATE_SAVED_REPORT] == result["path"]
 
 
@@ -93,3 +94,32 @@ def test_save_report_tool_returns_error_instead_of_raising(tmp_path, monkeypatch
 
     assert result["ok"] is False and "too long" in result["error"]
     assert STATE_SAVED_REPORT not in ctx.state
+
+
+def test_second_save_in_same_session_updates_same_file(tmp_path, monkeypatch, settings):
+    # e.g. the orchestrator saves, the critic rejects, the revision saves again
+    monkeypatch.setattr(report_tools, "get_settings", lambda: settings.model_copy(update={"reports_dir": tmp_path}))
+    ctx = make_tool_context()
+
+    first = save_report("Breaches", "draft with a wrong number", ctx)
+    second = save_report("Breaches", "corrected content", ctx)
+
+    assert second["path"] == first["path"]
+    assert len(list(tmp_path.iterdir())) == 1  # no orphaned draft
+    assert "corrected content" in (tmp_path / Path(first["path"]).name).read_text()
+
+
+def test_new_session_never_overwrites_another_sessions_report(tmp_path, monkeypatch, settings):
+    monkeypatch.setattr(report_tools, "get_settings", lambda: settings.model_copy(update={"reports_dir": tmp_path}))
+
+    a = save_report("Same title", "A", make_tool_context())
+    b = save_report("Same title", "B", make_tool_context())
+
+    assert a["path"] != b["path"]
+    assert len(list(tmp_path.iterdir())) == 2
+
+
+@pytest.mark.parametrize("bad", ["../x.md", "/etc/passwd", "a/b.md", "x.txt", "UPPER.md", ""])
+def test_replace_name_must_be_a_plain_report_name(tmp_path, bad):
+    with pytest.raises(ValueError):
+        write_report(tmp_path, "t", "c", replace_name=bad)

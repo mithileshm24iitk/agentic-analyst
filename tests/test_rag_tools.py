@@ -77,3 +77,18 @@ def test_retrieve_returns_error_instead_of_raising(monkeypatch):
 
     assert result == {"ok": False, "chunks": [], "sources": [], "error": "index missing"}
     assert ctx.state[STATE_QUERIES] == ["q"]
+
+
+def test_embedding_quota_error_is_fatal_and_recorded(monkeypatch):
+    from google.genai import errors as genai_errors
+
+    def quota(query):
+        raise genai_errors.ClientError(429, {"error": {"code": 429, "message": "quota", "status": "X"}})
+
+    monkeypatch.setattr(rag_tools, "hybrid_search", quota)
+    ctx = make_tool_context()
+
+    result = retrieve("q", ctx)
+
+    assert result["ok"] is False and "Do not retry" in result["error"]
+    assert ctx.state["upstream_error"] == {"error_type": "quota_exceeded", "tool": "retrieve"}

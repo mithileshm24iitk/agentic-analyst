@@ -153,3 +153,66 @@ def test_existing_limit_kept():
     out = check("SELECT order_id FROM `bigquery-public-data.thelook_ecommerce.orders` LIMIT 5")
     assert out.endswith("LIMIT 5")
     assert out.count("LIMIT") == 1
+
+
+# --- functions: only built-ins ------------------------------------------------
+
+USERS = "`bigquery-public-data.thelook_ecommerce.users`"
+
+
+@pytest.mark.parametrize(
+    "call",
+    [
+        "`other-project.dataset.remote_udf`(email)",  # one quoted identifier
+        "`other-project`.dataset.remote_udf(email)",  # split, project quoted
+        "other_dataset.my_udf(email)",  # dataset-qualified
+        "`bigquery-public-data.thelook_ecommerce.some_udf`(email)",  # even in the allowed dataset
+    ],
+)
+def test_qualified_user_defined_functions_rejected(call):
+    with pytest.raises(SqlRejected, match="Only built-in BigQuery functions"):
+        check(f"SELECT {call} FROM {USERS}")
+
+
+def test_table_function_from_other_project_rejected():
+    with pytest.raises(SqlRejected):
+        check("SELECT * FROM `other-project.ds.tvf`(1)")
+
+
+def test_builtin_functions_and_namespaces_allowed():
+    out = check(
+        f"SELECT SAFE_DIVIDE(1, 2), SAFE.PARSE_DATE('%Y', '2024'), NET.HOST('http://x.com'), "
+        f"HLL_COUNT.EXTRACT(HLL_COUNT.INIT(id)), APPROX_TOP_COUNT(id, 5), COUNT(*) FROM {USERS}"
+    )
+    assert out.startswith("SELECT")
+
+
+def test_region_information_schema_rejected():
+    with pytest.raises(SqlRejected):
+        check("SELECT query FROM `region-us`.INFORMATION_SCHEMA.JOBS_BY_PROJECT")
+
+
+# --- LIMIT clamping -----------------------------------------------------------
+
+
+def test_larger_limit_clamped_to_max_rows():
+    out = check(f"SELECT id FROM {USERS} LIMIT 10000000", max_rows=100)
+    assert out.endswith("LIMIT 100") and "10000000" not in out
+
+
+def test_limit_equal_to_max_rows_kept():
+    assert check(f"SELECT id FROM {USERS} LIMIT 100", max_rows=100).endswith("LIMIT 100")
+
+
+def test_union_outer_limit_clamped_and_inner_limit_valid():
+    out = check(
+        f"SELECT id FROM {USERS} UNION ALL (SELECT id FROM {USERS} LIMIT 5) LIMIT 999", max_rows=50
+    )
+    assert out.endswith("LIMIT 50")
+    assert "LIMIT 5)" in out  # inner LIMIT untouched, one valid outer LIMIT
+    assert out.count("LIMIT") == 2
+
+
+def test_non_literal_limit_replaced():
+    out = check(f"SELECT id FROM {USERS} LIMIT 10 * 1000", max_rows=100)
+    assert out.endswith("LIMIT 100")

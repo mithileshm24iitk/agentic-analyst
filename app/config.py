@@ -45,6 +45,11 @@ class Settings(BaseSettings):
     critic_max_revisions: int = 1
     reports_dir: Path = Path("reports")
 
+    # Timeouts. One model or embedding HTTP call, and one whole API request
+    # (kept under Cloud Run's default 300s so we answer with clean JSON first).
+    llm_timeout_seconds: int = 90
+    request_timeout_seconds: int = 270
+
     @model_validator(mode="after")
     def _default_models_to_worker(self) -> "Settings":
         self.orchestrator_model = self.orchestrator_model or self.worker_model
