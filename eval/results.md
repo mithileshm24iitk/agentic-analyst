@@ -36,9 +36,9 @@ Generated: 2026-11-19T00:07:59+00:00
 
 | Retriever | Questions | Hit@3 | Hit@5 | MRR |
 | :--- | :---: | :---: | :---: | :---: |
-| Vector only (ChromaDB) | 12 | 91.7% | 91.7% | 0.917 |
-| BM25 only (rank_bm25) | 12 | 91.7% | 91.7% | 0.875 |
-| Hybrid (RRF) | 12 | 91.7% | 100.0% | 0.896 |
+| Vector only (ChromaDB) | 14 | 85.7% | 92.9% | 0.929 |
+| BM25 only (rank_bm25) | 14 | 92.9% | 92.9% | 0.893 |
+| Hybrid (RRF) | 14 | 92.9% | 100.0% | 0.911 |
 
 ## 6. LLM Judge Verdicts (for Spot-Checking)
 

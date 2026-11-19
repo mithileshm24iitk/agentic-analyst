@@ -57,13 +57,15 @@ A request travels **API → orchestration loop → orchestrator agent → specia
 | :--- | :--- |
 | Golden set (48 questions) and human review sheet | [golden.jsonl](../eval/golden.jsonl), [GOLDEN_REVIEW.md](../eval/GOLDEN_REVIEW.md) |
 | Ground-truth printer for hand-checking (`make eval-ground-truth`) | [show_ground_truth.py](../eval/show_ground_truth.py) |
-| Systems A–D, built from the same code as `/ask` | [systems.py](../eval/systems.py) |
+| Systems A–C, built from the same code as `/ask` | [systems.py](../eval/systems.py) |
 | Runner (parallel, cached, resumable, infra retry; `--ids`/`--rerun` for chosen items; `--rescore` re-scores the cache without calling systems) | [run_eval.py](../eval/run_eval.py) |
 | Live ground truth (reference SQL + rules parsed from the docs) | [ground_truth.py](../eval/ground_truth.py) |
 | Deterministic scoring (`expected_sources` = all listed files), then the LLM judge only for free text; a separate safety rubric for injection and not-in-documents items | [scoring.py](../eval/scoring.py), [judge.py](../eval/judge.py) |
 | Retrieval comparison (no LLM) | [retrieval_eval.py](../eval/retrieval_eval.py) |
 | Report and regression baseline | [report.py](../eval/report.py) → [results.md](../eval/results.md), [baseline.json](../eval/baseline.json) |
 | Latency benchmark | [bench.py](../eval/bench.py) |
+
+System D (stronger orchestrator model) is an optional configuration in [systems.py](../eval/systems.py) that was not evaluated.
 
 ## Deployment
 

@@ -68,27 +68,40 @@ Run `make help` to list every target. Other endpoints: `/ask/sql` and `/ask/rag`
 - **A:** a single agent with all tools attached (no orchestrator, no critic)
 - **B:** orchestrator + sub-agents, critic disabled
 - **C:** the full system
-- **D:** the full system with a stronger orchestrator model (`STRONG_ORCHESTRATOR_MODEL`)
 
-Run the evaluation with `make eval` (`make eval-smoke` runs 8 questions, `make eval-retrieval` runs the retrieval comparison, `make eval-check` checks for regressions against [eval/baseline.json](eval/baseline.json)). The numbers below will be filled in after the final run.
+Run the evaluation with `make eval` (`make eval-smoke` runs 8 questions, `make eval-retrieval` runs the retrieval comparison, `make eval-check` checks for regressions against [eval/baseline.json](eval/baseline.json)). Full report: [eval/results.md](eval/results.md).
 
-| Metric | A: single agent | B: no critic | C: full system | D: stronger orchestrator |
-| :--- | :---: | :---: | :---: | :---: |
-| Task success, overall | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
-| Documents | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
-| Database | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
-| Combined | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
-| Refusal / safety | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
-| SQL execution accuracy | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
-| Latency p50 / p95 | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
-| Avg cost per request | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
-| Avg LLM calls per request | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
+**Result:** accuracy is near the ceiling for all three systems. The multi-agent versions (B, C) cost about 2.5–3x the latency and 1.4–1.7x the cost per request of the single agent (A).
+
+| Metric | A: single agent | B: no critic | C: full system |
+| :--- | :---: | :---: | :---: |
+| Task success, overall | 97.9% (47/48) | 97.9% (47/48) | 100.0% (48/48) |
+| Documents | 100.0% (14/14) | 100.0% (14/14) | 100.0% (14/14) |
+| Database | 100.0% (14/14) | 100.0% (14/14) | 100.0% (14/14) |
+| Combined | 100.0% (12/12) | 91.7% (11/12) | 100.0% (12/12) |
+| Refusal / safety | 87.5% (7/8) | 100.0% (8/8) | 100.0% (8/8) |
+| SQL execution accuracy | 100.0% | 100.0% | 100.0% |
+| Latency p50 / p95 | 13.3s / 39.9s | 32.6s / 149.3s | 41.5s / 162.8s |
+| Avg cost per request | $0.00912 | $0.01256 | $0.01505 |
+| Avg LLM calls per request | 3.4 | 5.8 | 6.9 |
+
+The two failures: A's `ref_07` (parental leave) gave a generic scope refusal instead of saying the documents don't cover it, and B's `comb_06` returned an empty answer.
 
 | Retriever (14 document questions) | Hit@3 | Hit@5 | MRR |
 | :--- | :---: | :---: | :---: |
-| Vector only (ChromaDB) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
-| BM25 only | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
-| Hybrid (RRF) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) | TBD (filled after the final evaluation run) |
+| Vector only (ChromaDB) | 85.7% | 92.9% | 0.929 |
+| BM25 only | 92.9% | 92.9% | 0.893 |
+| Hybrid (RRF) | 92.9% | 100.0% | 0.911 |
+
+### Evaluation notes
+
+- **Synthetic, partly AI-drafted questions.** The 48-question golden set is synthetic, and part of it was drafted by AI (items marked `drafted_by=ai`).
+- **One run per question.** Each question was run once, so a difference of one question between systems is noise.
+- **Scorers were fixed after the first run** and the fixed scorers were applied to all systems. First-run scores were A 87.5%, B 89.6%, C 85.4%.
+- **Reruns.** Items that failed for infrastructure reasons, and 3 database items, were rerun once.
+- **B's empty output counts as a real failure** (`comb_06`), not as an infrastructure error.
+- **Latency was measured under parallel load** (several questions in flight at once), not one request at a time.
+- **Retrieval.** Hybrid is the only retriever with every expected source in its top 5 for all 14 questions (Hit@5 100.0%, against 92.9% for vector-only and for BM25-only). At top 3, hybrid and BM25-only tie at 92.9% and vector-only scores 85.7%. Vector-only has the highest MRR (0.929, against 0.911 for hybrid and 0.893 for BM25-only).
 
 ## Deployment
 
