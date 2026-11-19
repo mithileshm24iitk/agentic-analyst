@@ -163,3 +163,14 @@ def test_without_bucket_the_local_folder_is_used(monkeypatch, settings, tmp_path
     result = save_report("Local", "body", make_tool_context())
 
     assert result["ok"] is True and (tmp_path / result["path"].split("/")[-1]).is_file()
+
+
+def test_bucket_save_caps_calls_per_session(storage):
+    ctx = make_tool_context()
+    for i in range(report_tools.MAX_REPORTS_PER_SESSION):
+        assert save_report("Breaches", f"v{i}", ctx)["ok"] is True
+
+    uploads_before = len(storage.uploads)
+    capped = save_report("Breaches", "overflow", ctx)
+    assert capped["ok"] is False and "limit reached" in capped["error"]
+    assert len(storage.uploads) == uploads_before

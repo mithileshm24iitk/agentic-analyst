@@ -40,7 +40,7 @@ Optional 10-second opener: `make smoke-prod` shows `/health` is open and that a 
 
 - `saved_report` is set. On Cloud Run the report is a Cloud Storage object (only the object name is returned). Locally it is a file in `reports/`.
 - `save_report` runs only when the user explicitly asks. Questions 1–3 did not save anything.
-- If the critic forced a revision, the same report is overwritten with the corrected answer, so no unreviewed draft is left behind.
+- If the critic forced a revision, locally the same report is overwritten with the corrected answer; on Cloud Run (`objectCreator`), the revision writes `<name>-r2.md` and the response returns the newest object name (the earlier draft stays in the bucket).
 
 ## 5. Out of scope: "What will the weather be in Tokyo tomorrow, and should I pack an umbrella?"
 

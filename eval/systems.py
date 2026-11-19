@@ -79,7 +79,12 @@ def build_system(system_id: str, settings: Settings | None = None, plugins: list
         agent = build_baseline_agent(s.worker_model, s.bq_dataset, s.sql_max_attempts, **llm)
         return BaselineWrapper(AgentService(agent, plugins))
 
-    orch_model = s.strong_orchestrator_model if system_id == "D" else (s.orchestrator_model or s.worker_model)
+    if system_id == "D":
+        if not s.strong_orchestrator_model:
+            raise ValueError("System D requires STRONG_ORCHESTRATOR_MODEL to be set in config.")
+        orch_model = s.strong_orchestrator_model
+    else:
+        orch_model = s.orchestrator_model or s.worker_model
     orchestrator = AgentService(
         build_orchestrator(orch_model, s.worker_model, s.bq_dataset, s.sql_max_attempts, **llm),
         plugins,
@@ -117,6 +122,8 @@ async def ask_in_process(
     with request_span(request_id, endpoint) as span:
         start_request(request_id, question, endpoint)
         result: AgentResult | None = None
+        status = "cancelled"
+        error_type: str | None = None
         try:
             result = await run_agent_safely(service.ask(question), request_id, timeout_seconds)
             upstream = result.state.get(STATE_UPSTREAM_ERROR)
@@ -124,16 +131,17 @@ async def ask_in_process(
                 raise ApiError(upstream["error_type"], request_id)
             if not result.answer or not result.answer.strip():
                 raise ApiError("empty_answer", request_id)
+            status = "ok"
         except ApiError as exc:
-            record = finish_request(request_id, exc.error_type, result.state if result else {}, None)
+            status = exc.error_type
+            error_type = exc.error_type
+        finally:
+            record = finish_request(request_id, status, result.state if result else {}, None)
             record["eval_trace"] = eval_trace(result.state if result else {})
             span.set_attribute("route", record["route"])
-            span.set_attribute("status", exc.error_type)
-            return None, record, exc.error_type
+            span.set_attribute("status", status)
 
-        record = finish_request(request_id, "ok", result.state, None)
-        record["eval_trace"] = eval_trace(result.state)
-        span.set_attribute("route", record["route"])
-        span.set_attribute("status", "ok")
+        if error_type is not None:
+            return None, record, error_type
         body = {**build_ask_response(result), "metrics": response_metrics(record)}
         return body, record, None

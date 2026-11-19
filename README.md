@@ -71,7 +71,7 @@ Run `make help` to list every target. Other endpoints: `/ask/sql` and `/ask/rag`
 
 Run the evaluation with `make eval` (`make eval-smoke` runs 8 questions, `make eval-retrieval` runs the retrieval comparison, `make eval-check` checks for regressions against [eval/baseline.json](eval/baseline.json)). Full report: [eval/results.md](eval/results.md).
 
-**Result:** accuracy is near the ceiling for all three systems. The multi-agent versions (B, C) cost about 2.5–3x the latency and 1.4–1.7x the cost per request of the single agent (A).
+**Result:** accuracy is near the ceiling for all three systems. The multi-agent versions (B, C) cost about 2.5–3.1x the p50 latency (3.7–4.1x at p95) and 1.4–1.7x the cost per request of the single agent (A).
 
 | Metric | A: single agent | B: no critic | C: full system |
 | :--- | :---: | :---: | :---: |
@@ -80,7 +80,7 @@ Run the evaluation with `make eval` (`make eval-smoke` runs 8 questions, `make e
 | Database | 100.0% (14/14) | 100.0% (14/14) | 100.0% (14/14) |
 | Combined | 100.0% (12/12) | 91.7% (11/12) | 100.0% (12/12) |
 | Refusal / safety | 87.5% (7/8) | 100.0% (8/8) | 100.0% (8/8) |
-| SQL execution accuracy | 100.0% | 100.0% | 100.0% |
+| SQL execution accuracy (14 DB items) | 100.0% | 100.0% | 100.0% |
 | Latency p50 / p95 | 13.3s / 39.9s | 32.6s / 149.3s | 41.5s / 162.8s |
 | Avg cost per request | $0.00912 | $0.01256 | $0.01505 |
 | Avg LLM calls per request | 3.4 | 5.8 | 6.9 |
@@ -97,11 +97,12 @@ The two failures: A's `ref_07` (parental leave) gave a generic scope refusal ins
 
 - **Synthetic, partly AI-drafted questions.** The 48-question golden set is synthetic, and part of it was drafted by AI (items marked `drafted_by=ai`).
 - **One run per question.** Each question was run once, so a difference of one question between systems is noise.
-- **Scorers were fixed after the first run** and the fixed scorers were applied to all systems. First-run scores were A 87.5%, B 89.6%, C 85.4%.
-- **Reruns.** Items that failed for infrastructure reasons, and 3 database items, were rerun once.
+- **Scorers were fixed after the first run** and the fixed scorers were applied to all systems (`--rescore`, which overwrites the git-ignored raw cache; pre-fix scores from that unarchived run were A 87.5%, B 89.6%, C 85.4%).
+- **Selective reruns.** After rescoring, 4 items (`C doc_07`, `A db_01`, `B db_13`, `C db_13`) were rerun once while passing items remained cached. Rerunning failures without rerunning passes introduces upward selection bias.
+- **Same-model judge.** The LLM judge and set extractor used `WORKER_MODEL` (`gemini-3.8-flash`), the same model as the systems under test (overridable with `JUDGE_MODEL`), which can introduce self-judging bias.
 - **B's empty output counts as a real failure** (`comb_06`), not as an infrastructure error.
 - **Latency was measured under parallel load** (several questions in flight at once), not one request at a time.
-- **Retrieval.** Hybrid is the only retriever with every expected source in its top 5 for all 14 questions (Hit@5 100.0%, against 92.9% for vector-only and for BM25-only). At top 3, hybrid and BM25-only tie at 92.9% and vector-only scores 85.7%. Vector-only has the highest MRR (0.929, against 0.911 for hybrid and 0.893 for BM25-only).
+- **Retrieval.** On this 14-question set (where 1 question = 7.1 pp), hybrid is the only retriever with every expected source in its top 5 for all 14 questions (Hit@5 100.0%, against 92.9% for vector-only and for BM25-only). The two distinguishing items (`doc_02` and `doc_03`) were specifically written to test BM25-only and vector-only weaknesses. At top 3, hybrid and BM25-only tie at 92.9% and vector-only scores 85.7%; vector-only has the highest MRR (0.929, against 0.911 for hybrid and 0.893 for BM25-only).
 
 ## Deployment
 
@@ -119,8 +120,6 @@ The service runs on **Cloud Run**. Step-by-step setup is in [docs/DEPLOY.md](doc
 - **Smoke test:** `make smoke-prod` checks that `/health` is open, that a missing or wrong key gets a 401, and that one real question is answered.
 
 Measured on the deployed service, **one request only** (the smoke test, not an average): a documents question answered in 10.6 s with 5 LLM calls, at an estimated cost of $0.0054.
-
-Cloud Trace screenshot of a request: TBD (filled after the final evaluation run)
 
 ## Design decisions
 
@@ -144,10 +143,10 @@ Cloud Trace screenshot of a request: TBD (filled after the final evaluation run)
   - blocked user-defined functions from other projects in SQL, and clamped oversized LIMITs
   - kept the last *successful* query as the evidence when a later query fails
   - stopped SQL retries on auth and quota errors, which now return a clean 502/503
-  - wrapped and escaped documents, SQL rows and critic feedback as data, so injected text cannot pose as instructions
+  - wrapped and escaped documents, SQL rows, and critic feedback as data in the critic and revision prompts (specialists receive raw tool outputs and rely on prompt boundaries; `save_report` is capped per session)
   - added a per-call LLM timeout and a whole-request deadline that stays under Cloud Run's 300 s limit
   - deleted each session after its request, which fixed a memory leak
-  - made a revised answer overwrite the same report instead of leaving an unreviewed draft
+  - made a revised answer overwrite the same report locally (on Cloud Run, `objectCreator` forbids overwrites, so revisions write `<name>-r2.md` and the earlier draft stays in the bucket)
   - turned empty (safety-blocked) answers into a clear error
   - added the request id to every log line
 

@@ -48,8 +48,22 @@ INFRA_ERROR_TYPES = {
     TOOL_ERROR,
 }
 
-# Agents whose failed model calls count as a RAG / SQL tool error (they are the orchestrator's tools).
-TOOL_AGENTS = {"rag_agent", "sql_agent"}
+# Agents whose failed model calls count as an infrastructure error (symmetric across A, B and C).
+TOOL_AGENTS = {"rag_agent", "sql_agent", "baseline_agent"}
+# Transient/infrastructure model error labels (from app.errors.classify or legacy exception names).
+# Excludes 4xx ClientError / internal_error so agent/request bugs are not hidden as infra.
+INFRA_LLM_ERRORS = {
+    "quota_exceeded",
+    "timeout",
+    "upstream_unavailable",
+    "auth_error",
+    "ServerError",
+    "TimeoutError",
+    "DeadlineExceeded",
+    "TooManyRequests",
+    "ResourceExhausted",
+    "ServiceUnavailable",
+}
 # Tools whose failures never come from the agent's input.
 ALWAYS_INFRA_TOOLS = {"retrieve", "get_schema"}
 
@@ -132,13 +146,55 @@ def expected_rows_found(
     return (True, "expected rows found in a successful SQL result")
 
 
+def _label_in_text(label: str, text: str) -> bool:
+    """Word-boundary match so e.g. 'men' does not match inside 'women'."""
+    return bool(re.search(rf"(?<!\w){re.escape(label)}(?!\w)", text))
+
+
+def _row_values_paired(answer: str, row: dict[str, Any], rel_tol: float, abs_tol: float) -> bool:
+    """For rows with both string labels and numbers, verify they appear together in one line/sentence."""
+    labels = [
+        str(v).strip().lower()
+        for v in row.values()
+        if v is not None and not _is_number(v) and str(v).strip()
+    ]
+    nums = [_to_float(v) for v in row.values() if v is not None and _is_number(v)]
+    if not labels or not nums:
+        return True
+    segments: list[str] = []
+    for line in answer.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "|" in line:
+            segments.append(line)
+        else:
+            segments.extend(re.split(r"(?<=[.!?])\s+", line))
+    for seg in segments:
+        low = seg.lower()
+        if not all(_label_in_text(lbl, low) for lbl in labels):
+            continue
+        seg_nums = [float(m) for m in re.findall(r"-?\d+(?:\.\d+)?", seg.replace(",", ""))]
+        if all(
+            any(
+                math.isclose(n, target, rel_tol=max(rel_tol, 1e-3), abs_tol=max(abs_tol, 0.05))
+                for n in seg_nums
+            )
+            for target in nums
+        ):
+            return True
+    return False
+
+
 def answer_mentions_expected_values(
     answer: str,
     expected_rows: list[dict[str, Any]],
     rel_tol: float = 1e-3,
     abs_tol: float = 1e-2,
 ) -> tuple[bool, str]:
-    """Verify that the natural-language answer mentions the key values from expected_rows."""
+    """Verify that the natural-language answer mentions the key values from expected_rows,
+    and pairs labels with their corresponding numbers for multi-column rows.
+    """
     normalized = answer.replace(",", "")
     numbers_in_text = [float(m) for m in re.findall(r"-?\d+(?:\.\d+)?", normalized)]
     lower_answer = answer.lower()
@@ -158,6 +214,8 @@ def answer_mentions_expected_values(
                 sval = str(val).strip().lower()
                 if sval and sval not in lower_answer:
                     return (False, f"answer missing expected value {val!r}")
+        if not _row_values_paired(answer, row, rel_tol, abs_tol):
+            return (False, f"answer does not pair values for expected row {row}")
     return (True, "answer states all expected values")
 
 
@@ -313,7 +371,7 @@ def find_tool_errors(metrics_record: dict[str, Any] | None, trace: dict[str, Any
     errors: list[str] = []
     record = metrics_record or {}
     for call in record.get("llm_detail") or []:
-        if call.get("error") and call.get("agent") in TOOL_AGENTS:
+        if call.get("error") in INFRA_LLM_ERRORS and call.get("agent") in TOOL_AGENTS:
             errors.append(f"{call['agent']} model call raised {call['error']}")
     for call in record.get("tool_detail") or []:
         if not call.get("ok", True) and call.get("name") in ALWAYS_INFRA_TOOLS:
@@ -576,7 +634,7 @@ def _score_answer(
             sql_ok, sql_reason = expected_rows_found(sql_calls, expected_rows, rel_tol=tol, abs_tol=max(tol, 0.05))
             ans_ok, ans_reason = answer_mentions_expected_values(answer, expected_rows, rel_tol=tol, abs_tol=max(tol, 0.05))
             missing = check_must_include(answer, gt["must_include"])
-            passed = ans_ok and not missing and not absent_sources and not write
+            passed = sql_ok and ans_ok and not missing and not absent_sources and not write
             reason = (
                 "KPI answer matches the official definition"
                 if passed

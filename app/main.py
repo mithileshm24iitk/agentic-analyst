@@ -78,9 +78,16 @@ app = FastAPI(title="Agentic Analyst", lifespan=lifespan)
 
 @app.middleware("http")
 async def add_request_id(request: Request, call_next):
-    """Give every request an id: used in error bodies and logs, returned as X-Request-ID."""
+    """Give every request an id and enforce X-API-Key on every route except /health."""
     request.state.request_id = uuid.uuid4().hex
     set_request_id(request.state.request_id)  # for logs in tools, critic and embeddings
+    if request.url.path != "/health":
+        try:
+            require_api_key(request, request.headers.get("x-api-key"))
+        except ApiError as exc:
+            response = await api_error_handler(request, exc)
+            response.headers["X-Request-ID"] = request.state.request_id
+            return response
     response = await call_next(request)
     response.headers["X-Request-ID"] = request.state.request_id
     return response
@@ -112,9 +119,6 @@ def require_api_key(request: Request, x_api_key: Annotated[str | None, Header()]
         raise ApiError("unauthorized", request.state.request_id)
 
 
-Protected = [Depends(require_api_key)]
-
-
 async def run_agent(
     request: Request, service: Any, question: str, endpoint: str, default_route: str | None = None
 ) -> tuple[AgentResult, dict[str, Any]]:
@@ -133,6 +137,7 @@ async def run_agent(
     with request_span(request_id, endpoint) as span:
         start_request(request_id, question, endpoint)
         result: AgentResult | None = None
+        status = "cancelled"
         try:
             result = await run_agent_safely(
                 service.ask(question), request_id, request.app.state.request_timeout_seconds
@@ -144,10 +149,12 @@ async def run_agent(
                 raise ApiError(upstream["error_type"], request_id)
             if not result.answer:
                 raise ApiError("empty_answer", request_id)
+            status = "ok"
         except ApiError as e:
-            _close_request(request, span, e.error_type, result, default_route)
+            status = e.error_type
             raise
-        record = _close_request(request, span, "ok", result, default_route)
+        finally:
+            record = _close_request(request, span, status, result, default_route)
         return result, record
 
 
@@ -245,7 +252,7 @@ def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
-@app.post("/ask", response_model=AskResponse, dependencies=Protected)
+@app.post("/ask", response_model=AskResponse)
 async def ask(
     body: AskRequest,
     request: Request,
@@ -255,7 +262,7 @@ async def ask(
     return {**build_ask_response(result), "metrics": response_metrics(record)}
 
 
-@app.post("/ask/sql", response_model=SqlAskResponse, dependencies=Protected)
+@app.post("/ask/sql", response_model=SqlAskResponse)
 async def ask_sql(
     body: AskRequest,
     request: Request,
@@ -270,7 +277,7 @@ async def ask_sql(
     )
 
 
-@app.post("/ask/rag", response_model=RagAskResponse, dependencies=Protected)
+@app.post("/ask/rag", response_model=RagAskResponse)
 async def ask_rag(
     body: AskRequest,
     request: Request,
@@ -291,7 +298,7 @@ SUMMARY_SCOPE = (
 )
 
 
-@app.get("/metrics/summary", dependencies=Protected)
+@app.get("/metrics/summary")
 def metrics_summary(request: Request) -> dict[str, Any]:
     """Aggregate METRICS_PATH: overall and per route. A missing or empty file gives zero requests."""
     return {"scope": SUMMARY_SCOPE, **build_summary(request.app.state.metrics_path)}

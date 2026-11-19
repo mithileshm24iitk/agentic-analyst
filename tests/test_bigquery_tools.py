@@ -224,3 +224,17 @@ def test_ordinary_bigquery_error_is_not_fatal(fake_client):
     assert result["error_type"] == "bigquery_error"
     assert "ordr_id" in result["error"]  # the agent needs the real message to fix its SQL
     assert "upstream_error" not in ctx.state
+
+
+def test_bigquery_error_is_sanitized_of_urls_project_and_job_id(fake_client):
+    fake_client.error = BadRequest(
+        "400 POST https://bigquery.googleapis.com/bigquery/v2/projects/secret-proj/jobs: "
+        "Unrecognized name: ordr_id at [1:8]\n\nLocation: US\nJob ID: job-secret-123"
+    )
+    result = run_query(GOOD_SQL, make_tool_context())
+
+    assert result["error_type"] == "bigquery_error"
+    assert "ordr_id" in result["error"]
+    assert "secret-proj" not in result["error"]
+    assert "bigquery.googleapis.com" not in result["error"]
+    assert "job-secret-123" not in result["error"]

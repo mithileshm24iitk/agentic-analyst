@@ -60,6 +60,15 @@ def test_append_record_writes_one_json_line_each(tmp_path):
     assert [json.loads(line)["route"] for line in lines] == ["docs", "sql"]
 
 
+def test_append_record_trims_oldest_lines_when_over_max_bytes(tmp_path):
+    path = tmp_path / "requests.jsonl"
+    for i in range(6):
+        append_record(path, {**record(route="docs"), "request_id": f"r{i}"}, max_bytes=300, keep_lines=3)
+
+    ids = [json.loads(line)["request_id"] for line in path.read_text().splitlines()]
+    assert len(ids) <= 3 and ids[-1] == "r5"
+
+
 def test_read_records_handles_missing_empty_and_broken_lines(tmp_path):
     assert read_records(tmp_path / "missing.jsonl") == []
     empty = tmp_path / "empty.jsonl"

@@ -24,13 +24,13 @@ test: ## Run the offline unit tests (no GCP needed)
 
 # Orchestrator (documents + database + critic): make ask Q="your question"
 ask: ## Ask the orchestrator: make ask Q="..."
-	curl -s -X POST localhost:$(PORT)/ask -H "Content-Type: application/json" $(AUTH) \
-		-d '{"question": "$(Q)"}'; echo
+	$(PY) -c 'import json, sys; print(json.dumps({"question": sys.argv[1]}))' "$(Q)" | \
+		curl -s -X POST localhost:$(PORT)/ask -H "Content-Type: application/json" $(AUTH) -d @-; echo
 
 # SQL agent smoke test: make ask-sql Q="How many orders were placed in 2024?"
 ask-sql: ## Ask the SQL agent only: make ask-sql Q="..."
-	curl -s -X POST localhost:$(PORT)/ask/sql -H "Content-Type: application/json" $(AUTH) \
-		-d '{"question": "$(Q)"}'; echo
+	$(PY) -c 'import json, sys; print(json.dumps({"question": sys.argv[1]}))' "$(Q)" | \
+		curl -s -X POST localhost:$(PORT)/ask/sql -H "Content-Type: application/json" $(AUTH) -d @-; echo
 
 # Real GCP tests: BigQuery, RAG and the full orchestrator (needs make ingest; a few Gemini calls)
 test-integration: ## Run integration tests against real BigQuery, RAG and Gemini
@@ -43,8 +43,8 @@ ingest: ## Build the document index in data/chroma (safe to re-run)
 
 # RAG agent smoke test: make ask-rag Q="What is the maximum return rate for Jeans?"
 ask-rag: ## Ask the RAG agent only: make ask-rag Q="..."
-	curl -s -X POST localhost:$(PORT)/ask/rag -H "Content-Type: application/json" $(AUTH) \
-		-d '{"question": "$(Q)"}'; echo
+	$(PY) -c 'import json, sys; print(json.dumps({"question": sys.argv[1]}))' "$(Q)" | \
+		curl -s -X POST localhost:$(PORT)/ask/rag -H "Content-Type: application/json" $(AUTH) -d @-; echo
 
 # Latency benchmark: 5 fixed questions x BENCH_RUNS through /ask (real GCP calls).
 # Try another thinking level with: make bench THINKING_LEVEL=LOW

@@ -76,3 +76,26 @@ def test_summary_states_its_scope(fake_app):
     assert body["scope"] == SUMMARY_SCOPE
     assert "current instance" in body["scope"] and "Cloud Logging" in body["scope"]
     assert "overall" in body and "by_route" in body
+
+
+def test_cancelled_request_cleans_up_active_metrics(tmp_path):
+    import asyncio
+    from types import SimpleNamespace
+
+    from app import metrics
+    from app.main import run_agent
+
+    class CancellingService:
+        async def ask(self, question):
+            raise asyncio.CancelledError()
+
+    req = SimpleNamespace(
+        state=SimpleNamespace(request_id="cancel-test-id"),
+        app=SimpleNamespace(state=SimpleNamespace(max_question_chars=2000, request_timeout_seconds=5, metrics_path=tmp_path / "m.jsonl")),
+    )
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(run_agent(req, CancellingService(), "hello", "/ask"))
+
+    assert "cancel-test-id" not in metrics._active
+    rows = [json.loads(line) for line in (tmp_path / "m.jsonl").read_text().splitlines()]
+    assert len(rows) == 1 and rows[0]["status"] == "cancelled"

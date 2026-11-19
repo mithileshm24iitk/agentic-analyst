@@ -144,6 +144,53 @@ def test_answer_mentions_expected_values_handles_commas_and_decimals():
     ok_bad, reason = answer_mentions_expected_values("In 2024, Women generated $900,000.", expected)
     assert ok_bad is False and "missing expected number" in reason
 
+    # Swapped label-value pairs must fail (and 'Men' must not match inside 'Women')
+    dept_rows = [{"department": "Men", "product_count": 13131}, {"department": "Women", "product_count": 15989}]
+    swapped, swap_reason = answer_mentions_expected_values("Men: 15,989 products. Women: 13,131 products.", dept_rows)
+    assert swapped is False and "does not pair" in swap_reason
+    paired, _ = answer_mentions_expected_values("Men: 13,131 products. Women: 15,989 products.", dept_rows)
+    assert paired is True
+
+
+def test_kpi_sql_requires_accurate_sql_not_only_answer_text():
+    item = {
+        "id": "comb_02",
+        "category": "combined",
+        "question": "2024 revenue?",
+        "check": {
+            "combined_type": "kpi_sql",
+            "reference_sql": "SELECT 1222975.54",
+            "expected_sources": ["kpi_definitions.md"],
+            "must_include": [],
+            "tolerance": 0.01,
+        },
+    }
+    wrong_sql_body = {
+        "answer": "Official 2024 revenue was $1,222,975.54 [kpi_definitions.md].",
+        "sources": ["kpi_definitions.md"],
+        "cited_sources": ["kpi_definitions.md"],
+        "sql": "SELECT 999 AS wrong_val",
+        "rows": [{"wrong_val": 999}],
+    }
+    res = score_item(
+        item, wrong_sql_body, None, docs_dir=REAL_DOCS, dataset="d",
+        query_runner=lambda _: [{"official_revenue_2024": 1222975.54}],
+    )
+    assert res["passed"] is False and res["sql_execution_accurate"] is False
+
+    # summarize_system includes kpi_sql items in sql_execution_accuracy
+    summary = summarize_system([
+        _make_raw_fixture_item("C", "db_01", "database", True, sql_ok=True),
+        {
+            **_make_raw_fixture_item("C", "comb_02", "combined", False, sql_ok=False),
+            "score": {
+                "passed": False, "infra_error": False, "reason": "bad sql",
+                "sql_execution_accurate": False, "expected_rows": [{"official_revenue_2024": 1222975.54}],
+            },
+        },
+    ])
+    assert summary["sql_execution_accuracy"] == 0.5
+
 
 # ---------------------------------------------------------------- 3. Set precision & recall
 
@@ -904,16 +951,22 @@ def test_database_item_fails_without_the_value_in_text_or_sql_or_with_a_write():
 
 def test_failed_item_with_a_tool_error_is_infra_but_a_passing_one_stays_passed():
     item = next(it for it in load_golden() if it["id"] == "doc_07")
-    # Like C doc_07: rag_agent's model calls raised; the system apologised.
-    record = {"llm_detail": [{"agent": "rag_agent", "error": "ClientError"}, {"agent": "rag_agent", "error": "ServerError"}]}
+    # Transient upstream errors (5xx / quota_exceeded) on a tool agent count as infra; 4xx ClientError does not.
+    record = {"llm_detail": [{"agent": "rag_agent", "error": "quota_exceeded"}, {"agent": "rag_agent", "error": "ServerError"}]}
     apology = {"answer": "The document lookup service encountered an error.", "sources": ["loyalty_program.md"]}
     res = score_item(item, apology, None, docs_dir=REAL_DOCS, dataset="d", metrics_record=record)
     assert res["passed"] is False and res["infra_error"] is True and res["error_type"] == "tool_error"
-    assert "rag_agent model call raised ClientError" in res["reason"]
+    assert "rag_agent model call raised quota_exceeded" in res["reason"]
 
     good = {"answer": "Gold 500, Platinum 1,500; 200 points = $10.", "sources": ["loyalty_program.md"]}
     ok = score_item(item, good, None, docs_dir=REAL_DOCS, dataset="d", metrics_record=record)
     assert ok["passed"] is True and ok["tool_errors"]
+
+    # Non-infra ClientError / internal_error is NOT hidden as infra; baseline_agent is symmetric with rag/sql agents.
+    assert find_tool_errors({"llm_detail": [{"agent": "rag_agent", "error": "ClientError"}]}, None) == []
+    assert find_tool_errors({"llm_detail": [{"agent": "baseline_agent", "error": "upstream_unavailable"}]}, None) == [
+        "baseline_agent model call raised upstream_unavailable"
+    ]
 
 
 def test_find_tool_errors_counts_infra_not_the_agents_own_bad_sql():

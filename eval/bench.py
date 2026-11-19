@@ -22,9 +22,7 @@ from fastapi.testclient import TestClient
 from app.config import get_settings
 from app.main import app
 from app.metrics_summary import read_records
-
-# Categories above their limit in the returns policy vs. the live data (checked in Phase 3).
-BREACHING = ["Suits", "Underwear", "Active", "Jumpsuits & Rompers", "Plus"]
+from eval.ground_truth import compute_category_breaches
 
 
 def _numbers_in(rows: list[dict]) -> set[str]:
@@ -51,10 +49,12 @@ def check_database(body: dict) -> str | None:
     return None
 
 
-def check_breaches(body: dict) -> str | None:
+def check_breaches(body: dict, expected: list[str] | None = None) -> str | None:
     if body["route"] != "both":
         return f"route {body['route']}"
-    missing = [c for c in BREACHING if c not in body["answer"]]
+    if expected is None:
+        return None
+    missing = [c for c in expected if c not in body["answer"]]
     return f"missing {missing}" if missing else None
 
 
@@ -124,6 +124,11 @@ def run() -> None:
     genai_logger.addHandler(retries)
     genai_logger.setLevel(logging.INFO)
 
+    expected_breaches = sorted(
+        b["category"]
+        for b in compute_category_breaches(settings.docs_dir, settings.bq_dataset)
+        if b["breaching"]
+    )
     results: list[dict[str, Any]] = []
     headers = {"X-API-Key": settings.api_key.get_secret_value()} if settings.api_key else {}
     with TestClient(app, headers=headers) as client:  # `with` runs the startup hook: real agents
@@ -137,7 +142,12 @@ def run() -> None:
                 body = response.json()
                 # An error (auth, quota, timeout) is not a wrong answer: keep the two apart.
                 error = None if response.status_code == 200 else body.get("error_type", str(response.status_code))
-                problem = check(body) if error is None else None
+                if error is not None:
+                    problem = None
+                elif check is check_breaches:
+                    problem = check_breaches(body, expected_breaches)
+                else:
+                    problem = check(body)
                 results.append({"key": key, "run": n, "wall_ms": wall, "record": record,
                                 "error": error, "correct": error is None and problem is None,
                                 "problem": problem, "answer": body.get("answer", "")})

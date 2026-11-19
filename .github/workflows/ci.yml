@@ -28,5 +28,14 @@ jobs:
           .venv/bin/python -m pip install --upgrade pip
           make install
 
+      - name: Check Python syntax
+        run: .venv/bin/python -m compileall -q app agents tools eval tests
+
+      - name: Lint shell scripts
+        run: shellcheck scripts/*.sh
+
+      - name: Validate Dockerfile syntax
+        run: docker build --check .
+
       - name: Run unit tests (no GCP access needed)
         run: make test

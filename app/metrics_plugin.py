@@ -6,7 +6,6 @@ has its own Runner with the same plugin, so its calls are counted too.
 All callbacks return None, so they never change what the agents do.
 """
 
-import threading
 import time
 from typing import Any, Optional
 
@@ -19,6 +18,7 @@ from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.tool_context import ToolContext
 
 from app.config import ModelPrice
+from app.errors import classify
 from app.metrics import ToolCall, current_metrics, make_llm_call
 
 
@@ -32,21 +32,24 @@ def _call_key(callback_context: CallbackContext) -> tuple[str, str, str]:
     return (callback_context.invocation_id, callback_context.agent_name, str(getattr(ctx, "branch", "")))
 
 
+def _tool_key(tool: BaseTool, tool_context: ToolContext) -> str:
+    """Unique key for an in-flight tool call, safe even when function_call_id is empty."""
+    return tool_context.function_call_id or f"{tool.name}:{id(tool_context)}"
+
+
 class MetricsPlugin(BasePlugin):
     def __init__(self, prices: dict[str, ModelPrice | None]) -> None:
         super().__init__(name="request_metrics")
         self._prices = prices
-        self._model_starts: dict[tuple[str, str, str], tuple[float, str]] = {}
-        self._tool_starts: dict[str, float] = {}
-        self._lock = threading.Lock()
 
     # ---------------------------------------------------------------- model calls
 
     async def before_model_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest
     ) -> Optional[LlmResponse]:
-        with self._lock:
-            self._model_starts[_call_key(callback_context)] = (time.perf_counter(), llm_request.model or "")
+        metrics = current_metrics()
+        if metrics is not None:
+            metrics.start_model_call(_call_key(callback_context), llm_request.model or "")
         return None
 
     async def after_model_callback(
@@ -60,14 +63,15 @@ class MetricsPlugin(BasePlugin):
     async def on_model_error_callback(
         self, *, callback_context: CallbackContext, llm_request: LlmRequest, error: Exception
     ) -> Optional[LlmResponse]:
-        self._record_model_call(callback_context, None, error=type(error).__name__)
+        self._record_model_call(callback_context, None, error=classify(error))
         return None  # let the error propagate as before
 
     def _record_model_call(self, callback_context: CallbackContext, usage: Any, error: str | None) -> None:
-        with self._lock:
-            start = self._model_starts.pop(_call_key(callback_context), None)
         metrics = current_metrics()
-        if start is None or metrics is None:
+        if metrics is None:
+            return
+        start = metrics.pop_model_call(_call_key(callback_context))
+        if start is None:
             return
         started, model = start
         metrics.add_llm_call(
@@ -86,8 +90,9 @@ class MetricsPlugin(BasePlugin):
     async def before_tool_callback(
         self, *, tool: BaseTool, tool_args: dict[str, Any], tool_context: ToolContext
     ) -> Optional[dict]:
-        with self._lock:
-            self._tool_starts[tool_context.function_call_id or ""] = time.perf_counter()
+        metrics = current_metrics()
+        if metrics is not None:
+            metrics.start_tool_call(_tool_key(tool, tool_context))
         return None
 
     async def after_tool_callback(
@@ -104,10 +109,11 @@ class MetricsPlugin(BasePlugin):
         return None
 
     def _record_tool_call(self, tool: BaseTool, tool_context: ToolContext, ok: bool) -> None:
-        with self._lock:
-            started = self._tool_starts.pop(tool_context.function_call_id or "", None)
         metrics = current_metrics()
-        if started is None or metrics is None:
+        if metrics is None:
+            return
+        started = metrics.pop_tool_call(_tool_key(tool, tool_context))
+        if started is None:
             return
         metrics.add_tool_call(
             ToolCall(

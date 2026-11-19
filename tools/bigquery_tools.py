@@ -12,6 +12,7 @@ Safety rules are enforced here in code, not only in the agent prompt:
 import concurrent.futures
 import datetime
 import decimal
+import logging
 from functools import lru_cache
 from itertools import islice
 from typing import Any
@@ -22,7 +23,16 @@ from google.cloud import bigquery
 from sqlglot import exp
 
 from app.config import get_settings
-from tools.upstream import FATAL_ERROR_TYPES, fatal_error_type, fatal_message, record_fatal_error
+from app.errors import current_request_id
+from tools.upstream import (
+    FATAL_ERROR_TYPES,
+    fatal_error_type,
+    fatal_message,
+    record_fatal_error,
+    sanitize_tool_error,
+)
+
+logger = logging.getLogger(__name__)
 
 # Session state keys (read later for metrics).
 STATE_ATTEMPTS = "sql_attempts"
@@ -94,10 +104,10 @@ BUILTIN_FUNCTION_NAMESPACES = {"SAFE", "NET", "HLL_COUNT", "KLL_QUANTILES"}
 
 
 def _check_functions(statement: exp.Expression) -> None:
-    """Reject qualified user-defined functions (e.g. `other-project.ds.udf`(x)).
+    """Reject qualified user-defined functions (e.g. `other-project.ds.udf`(x)) and AI.* functions.
 
-    A persistent or remote UDF in another project could read or send data outside
-    the allowed dataset, so only built-in functions may be called.
+    A persistent, remote, or AI.* function could read, send data, or invoke Vertex AI outside
+    the allowed dataset and byte cap, so only built-in SQL functions may be called.
     """
     for func in statement.find_all(exp.Anonymous):
         name = func.name
@@ -111,6 +121,23 @@ def _check_functions(statement: exp.Expression) -> None:
                 f"Function `{qualifier}.{name.rsplit('.', 1)[-1]}` is not allowed. "
                 "Only built-in BigQuery functions may be used."
             )
+
+    # Also catch qualified functions that sqlglot parses as dedicated Func subclasses
+    # (e.g. AI.GENERATE -> Dot(AI, AIGenerate), AI.IF -> Dot(AI, If)).
+    for dot in statement.find_all(exp.Dot):
+        if isinstance(dot.expression, exp.Func):
+            qualifier = dot.this.sql(dialect="bigquery").replace("`", "")
+            if qualifier.upper() not in BUILTIN_FUNCTION_NAMESPACES:
+                fn_name = dot.expression.sql_name() if hasattr(dot.expression, "sql_name") else type(dot.expression).__name__
+                raise SqlRejected(
+                    f"Function `{qualifier}.{fn_name}` is not allowed. "
+                    "Only built-in BigQuery functions may be used."
+                )
+
+    for node in statement.find_all(exp.AIGenerate):
+        raise SqlRejected(
+            f"Function `{node.sql_name()}` is not allowed. Only built-in BigQuery functions may be used."
+        )
 
 
 def _check_tables(statement: exp.Expression, dataset: str) -> None:
@@ -187,7 +214,8 @@ def get_schema(tool_context: ToolContext) -> dict:
         if fatal:
             record_fatal_error(tool_context.state, fatal, "get_schema")
             return {"ok": False, "error": fatal_message(fatal), "error_type": fatal}
-        return {"ok": False, "error": str(e), "error_type": "bigquery_error"}
+        logger.warning("request_id=%s get_schema failed", current_request_id(), exc_info=e)
+        return {"ok": False, "error": sanitize_tool_error(e), "error_type": "bigquery_error"}
 
     tables: dict[str, list[dict[str, str]]] = {}
     for row in rows:
@@ -297,8 +325,9 @@ def _validate_and_execute(sql: str, settings) -> tuple[dict, str]:
         fatal = fatal_error_type(e)
         if fatal:  # auth / quota: retrying with different SQL cannot help
             return _failure(fatal_message(fatal), fatal), safe_sql
-        # Other BigQuery errors go back to the agent so it can fix the SQL.
-        return _failure(str(e), "bigquery_error"), safe_sql
+        # Other BigQuery errors go back to the agent (sanitized) so it can fix the SQL.
+        logger.warning("request_id=%s run_query BigQuery error", current_request_id(), exc_info=e)
+        return _failure(sanitize_tool_error(e), "bigquery_error"), safe_sql
 
     return {
         "ok": True,

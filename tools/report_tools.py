@@ -26,6 +26,8 @@ from google.api_core import exceptions as gcp
 from app.config import get_settings
 
 STATE_SAVED_REPORT = "saved_report"
+STATE_REPORT_CALLS = "report_calls"
+MAX_REPORTS_PER_SESSION = 3
 MAX_TITLE_SLUG = 60
 MAX_CONTENT_CHARS = 100_000
 MAX_NAME_CLASHES = 100
@@ -160,7 +162,16 @@ def save_report(title: str, content: str, tool_context: ToolContext) -> dict:
     Returns {ok, path} on success or {ok: false, error}.
     """
     settings = get_settings()
-    previous = tool_context.state.get(STATE_SAVED_REPORT)
+    state = tool_context.state
+    calls = state.get(STATE_REPORT_CALLS, 0)
+    if calls >= MAX_REPORTS_PER_SESSION:
+        return {
+            "ok": False,
+            "path": None,
+            "error": f"Report save limit reached ({MAX_REPORTS_PER_SESSION} per request).",
+        }
+    state[STATE_REPORT_CALLS] = calls + 1
+    previous = state.get(STATE_SAVED_REPORT)
     try:
         if settings.reports_bucket:
             path = write_report_to_bucket(

@@ -7,7 +7,10 @@ answer that only says "data unavailable".
 """
 
 import logging
+import re
 from typing import Any
+
+from google.api_core import exceptions as gcp
 
 from app.errors import classify, current_request_id
 
@@ -15,6 +18,25 @@ logger = logging.getLogger(__name__)
 
 STATE_UPSTREAM_ERROR = "upstream_error"
 FATAL_ERROR_TYPES = {"auth_error", "quota_exceeded"}
+MAX_TOOL_ERROR_CHARS = 300
+
+_URL_RE = re.compile(r"https?://\S+")
+_PROJECT_RE = re.compile(r"\bprojects/[A-Za-z0-9._-]+")
+_JOB_ID_RE = re.compile(r"(?im)^\s*Job ID:.*$")
+_ABS_PATH_RE = re.compile(r"(?:^|(?<=\s))(?:/[A-Za-z0-9._-]+){2,}")
+
+
+def sanitize_tool_error(exc: BaseException) -> str:
+    """Return a concise, safe error message for the LLM without URLs, project IDs, job IDs or server paths."""
+    raw = exc.message if isinstance(exc, gcp.GoogleAPICallError) and getattr(exc, "message", None) else str(exc)
+    cleaned = _JOB_ID_RE.sub("", raw)
+    cleaned = _URL_RE.sub("<url>", cleaned)
+    cleaned = _PROJECT_RE.sub("projects/<redacted>", cleaned)
+    cleaned = _ABS_PATH_RE.sub("<path>", cleaned)
+    cleaned = " ".join(cleaned.split())
+    if len(cleaned) > MAX_TOOL_ERROR_CHARS:
+        cleaned = cleaned[: MAX_TOOL_ERROR_CHARS - 3].rstrip() + "..."
+    return cleaned or f"{type(exc).__name__} occurred."
 
 
 def fatal_error_type(exc: BaseException) -> str | None:

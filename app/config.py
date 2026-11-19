@@ -96,7 +96,7 @@ class Settings(BaseSettings):
     tracing_exporter: Literal["none", "console", "gcp"] = "none"
     bench_runs: int = 2
     judge_model: str | None = None
-    strong_orchestrator_model: str = "gemini-4-argon"
+    strong_orchestrator_model: str | None = None
     eval_concurrency: int = 4
     eval_max_drop_points: float = 10.0  # percentage points (0-100) allowed drop vs baseline.json
     # USD per 1M tokens per model. A model missing here, or mapped to null, gets

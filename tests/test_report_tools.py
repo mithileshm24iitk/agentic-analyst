@@ -123,3 +123,14 @@ def test_new_session_never_overwrites_another_sessions_report(tmp_path, monkeypa
 def test_replace_name_must_be_a_plain_report_name(tmp_path, bad):
     with pytest.raises(ValueError):
         write_report(tmp_path, "t", "c", replace_name=bad)
+
+
+def test_save_report_caps_calls_per_session(tmp_path, monkeypatch, settings):
+    monkeypatch.setattr(report_tools, "get_settings", lambda: settings.model_copy(update={"reports_dir": tmp_path}))
+    ctx = make_tool_context()
+
+    for i in range(report_tools.MAX_REPORTS_PER_SESSION):
+        assert save_report("Breaches", f"version {i}", ctx)["ok"] is True
+
+    capped = save_report("Breaches", "too many", ctx)
+    assert capped["ok"] is False and "limit reached" in capped["error"]

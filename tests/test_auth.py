@@ -30,7 +30,15 @@ def protected_app(monkeypatch, tmp_path):
     app.dependency_overrides.clear()
 
 
-PROTECTED = [("post", "/ask"), ("post", "/ask/sql"), ("post", "/ask/rag"), ("get", "/metrics/summary")]
+PROTECTED = [
+    ("post", "/ask"),
+    ("post", "/ask/sql"),
+    ("post", "/ask/rag"),
+    ("get", "/metrics/summary"),
+    ("get", "/docs"),
+    ("get", "/redoc"),
+    ("get", "/openapi.json"),
+]
 
 
 def call(method: str, path: str, headers: dict | None = None, question: str = "How many orders?"):

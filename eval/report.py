@@ -69,8 +69,17 @@ def summarize_system(items: list[dict[str, Any]]) -> dict[str, Any]:
             "excl_infra_success": _rate(cat_passed, len(cat_non_infra)),
         }
 
-    # SQL execution accuracy across database (and kpi_sql combined) questions
-    db_items = [x for x in non_infra if x["category"] == "database"]
+    # SQL execution accuracy across database and kpi_sql combined questions
+    db_items = [
+        x
+        for x in non_infra
+        if x["category"] == "database"
+        or (
+            x["category"] == "combined"
+            and x["score"].get("sql_execution_accurate") is not None
+            and x["score"].get("expected_rows") is not None
+        )
+    ]
     sql_ok_count = sum(1 for x in db_items if x["score"].get("sql_execution_accurate"))
     sql_accuracy = _rate(sql_ok_count, len(db_items))
 

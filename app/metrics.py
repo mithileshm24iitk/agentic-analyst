@@ -55,7 +55,25 @@ class RequestMetrics:
     started: float = field(default_factory=time.perf_counter)
     llm_calls: list[LlmCall] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
+    _model_starts: dict[tuple[str, str, str], tuple[float, str]] = field(default_factory=dict, repr=False)
+    _tool_starts: dict[str, float] = field(default_factory=dict, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+
+    def start_model_call(self, key: tuple[str, str, str], model: str) -> None:
+        with self._lock:
+            self._model_starts[key] = (time.perf_counter(), model)
+
+    def pop_model_call(self, key: tuple[str, str, str]) -> tuple[float, str] | None:
+        with self._lock:
+            return self._model_starts.pop(key, None)
+
+    def start_tool_call(self, key: str) -> None:
+        with self._lock:
+            self._tool_starts[key] = time.perf_counter()
+
+    def pop_tool_call(self, key: str) -> float | None:
+        with self._lock:
+            return self._tool_starts.pop(key, None)
 
     def add_llm_call(self, call: LlmCall) -> None:
         with self._lock:  # tools run in a thread pool; keep appends safe
@@ -172,15 +190,30 @@ def response_metrics(record: dict[str, Any]) -> dict[str, Any]:
 
 
 _write_lock = threading.Lock()
+MAX_METRICS_FILE_BYTES = 5 * 1024 * 1024  # 5 MiB cap for Cloud Run's RAM-backed filesystem
+KEEP_METRICS_LINES = 1000
 
 
-def append_record(path: Path, record: dict[str, Any]) -> None:
-    """Append one JSON line. Never raises: losing a metrics line must not fail a request."""
+def append_record(
+    path: Path,
+    record: dict[str, Any],
+    *,
+    max_bytes: int = MAX_METRICS_FILE_BYTES,
+    keep_lines: int = KEEP_METRICS_LINES,
+) -> None:
+    """Append one JSON line, trimming oldest lines when the file exceeds max_bytes. Never raises."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(record, default=str, ensure_ascii=False)
-        with _write_lock, path.open("a", encoding="utf-8") as f:
-            f.write(line + "\n")
+        with _write_lock:
+            if max_bytes > 0 and path.exists() and path.stat().st_size >= max_bytes:
+                existing = path.read_text(encoding="utf-8").splitlines()
+                kept = existing[-(max(keep_lines - 1, 0)) :] if keep_lines > 1 else []
+                kept.append(line)
+                path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+            else:
+                with path.open("a", encoding="utf-8") as f:
+                    f.write(line + "\n")
     except OSError:
         logging.getLogger(__name__).exception("request_id=%s could not write metrics", record.get("request_id"))
 

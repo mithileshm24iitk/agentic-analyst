@@ -167,6 +167,9 @@ USERS = "`bigquery-public-data.thelook_ecommerce.users`"
         "`other-project`.dataset.remote_udf(email)",  # split, project quoted
         "other_dataset.my_udf(email)",  # dataset-qualified
         "`bigquery-public-data.thelook_ecommerce.some_udf`(email)",  # even in the allowed dataset
+        "AI.GENERATE('prompt')",  # BigQuery AI.* invokes Vertex AI outside byte cap
+        "AI.GENERATE('prompt', connection_id => 'other-proj.us.conn')",
+        "AI.IF(TRUE, 1, 2)",
     ],
 )
 def test_qualified_user_defined_functions_rejected(call):

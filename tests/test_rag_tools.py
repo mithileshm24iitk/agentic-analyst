@@ -92,3 +92,15 @@ def test_embedding_quota_error_is_fatal_and_recorded(monkeypatch):
 
     assert result["ok"] is False and "Do not retry" in result["error"]
     assert ctx.state["upstream_error"] == {"error_type": "quota_exceeded", "tool": "retrieve"}
+
+
+def test_retrieve_sanitizes_internal_paths_in_errors(monkeypatch):
+    def broken(query):
+        raise RuntimeError("sqlite error at /app/data/chroma/chroma.sqlite3 via https://internal.example/x")
+
+    monkeypatch.setattr(rag_tools, "hybrid_search", broken)
+    result = retrieve("q", make_tool_context())
+
+    assert result["ok"] is False
+    assert "/app/data/chroma/chroma.sqlite3" not in result["error"]
+    assert "internal.example" not in result["error"]
