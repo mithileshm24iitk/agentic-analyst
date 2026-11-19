@@ -1,4 +1,4 @@
-"""Report and baseline generator for Phase 6 evaluation (eval/results.md and eval/baseline.json).
+"""Report and baseline generator for the evaluation (eval/results.md and eval/baseline.json).
 
 Reads raw per-item evaluation JSON files from eval/results/raw/ (plus optional retrieval
 ablation JSON from eval/results/retrieval_ablation.json) and produces:
@@ -50,7 +50,7 @@ def _avg(vals: list[float]) -> float | None:
 
 
 def summarize_system(items: list[dict[str, Any]]) -> dict[str, Any]:
-    """Compute all Phase 6 aggregate metrics for one system's raw result items."""
+    """Compute all aggregate metrics for one system's raw result items."""
     total = len(items)
     passed = sum(1 for x in items if x["score"]["passed"])
     infra_failures = sum(1 for x in items if x["score"].get("infra_error"))
@@ -130,7 +130,7 @@ def render_results_markdown(
     summaries = {sys_id: summarize_system([r for r in raw_results if r["system"] == sys_id]) for sys_id in systems}
 
     lines: list[str] = [
-        "# Phase 6 Evaluation Report",
+        "# Evaluation Report",
         "",
         f"Generated: {datetime.now(timezone.utc).isoformat(timespec='seconds')}",
         "",

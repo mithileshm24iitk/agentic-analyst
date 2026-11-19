@@ -1,7 +1,7 @@
 {
   "system": "C",
-  "updated_at": "2026-11-18T22:11:20+00:00",
-  "full_total": 8,
+  "updated_at": "2026-11-19T00:07:59+00:00",
+  "full_total": 48,
   "full_strict_success": 1.0,
   "full_excl_infra_success": 1.0,
   "smoke_total": 8,
@@ -9,29 +9,29 @@
   "smoke_excl_infra_success": 1.0,
   "by_category": {
     "documents": {
-      "total": 2,
-      "passed": 2,
+      "total": 14,
+      "passed": 14,
       "infra_failures": 0,
       "strict_success": 1.0,
       "excl_infra_success": 1.0
     },
     "database": {
-      "total": 2,
-      "passed": 2,
+      "total": 14,
+      "passed": 14,
       "infra_failures": 0,
       "strict_success": 1.0,
       "excl_infra_success": 1.0
     },
     "combined": {
-      "total": 2,
-      "passed": 2,
+      "total": 12,
+      "passed": 12,
       "infra_failures": 0,
       "strict_success": 1.0,
       "excl_infra_success": 1.0
     },
     "refusal": {
-      "total": 2,
-      "passed": 2,
+      "total": 8,
+      "passed": 8,
       "infra_failures": 0,
       "strict_success": 1.0,
       "excl_infra_success": 1.0

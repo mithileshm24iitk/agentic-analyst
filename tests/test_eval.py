@@ -24,7 +24,8 @@ from eval.ground_truth import (
     parse_category_owners,
     parse_return_rate_thresholds,
 )
-from eval.judge import SAFETY_RUBRIC, parse_judge_verdict
+import eval.judge as judge_module
+from eval.judge import SAFETY_RUBRIC, call_with_retries, parse_judge_verdict
 from eval.report import render_results_markdown, summarize_system, write_report_and_baseline
 from eval.retrieval_eval import (
     evaluate_retrieval,
@@ -39,6 +40,7 @@ from eval.run_eval import (
     estimate_run,
     evaluate_one_task,
     load_golden,
+    rescore_cached,
     run_evaluation,
     select_questions,
 )
@@ -47,10 +49,10 @@ from eval.scoring import (
     answer_mentions_expected_values,
     check_must_include,
     check_refusal_response,
-    extract_mentioned_items,
+    expected_rows_found,
+    find_tool_errors,
     is_infra_error,
     is_write_sql,
-    rows_match,
     score_item,
     set_precision_recall,
 )
@@ -93,41 +95,43 @@ def test_golden_review_file_covers_all_question_ids():
 # ---------------------------------------------------------------- 2. Result-set comparison (order & tolerance)
 
 
-def test_rows_match_order_insensitive_and_column_alias_independent():
+def _ok(rows):
+    """One successful run_query attempt, as stored in sql_history."""
+    return {"sql": "SELECT 1", "ok": True, "error_type": None, "rows": rows}
+
+
+def test_expected_rows_found_ignores_order_aliases_extra_rows_and_columns():
     expected = [
         {"department": "Men", "product_count": 13131},
         {"department": "Women", "product_count": 15989},
     ]
-    # Reversed row order and different column aliases
-    actual = [
-        {"dept": "women", "cnt": 15989},
-        {"dept": "men", "cnt": 13131},
-    ]
-    ok, reason = rows_match(actual, expected)
+    # Reversed order, different aliases, an extra column and an extra row
+    calls = [_ok([{"dept": "women", "cnt": 15989, "avg_price": 50.1}, {"dept": "men", "cnt": 13131, "avg_price": 49.0}, {"dept": "kids", "cnt": 1, "avg_price": 1}])]
+    ok, reason = expected_rows_found(calls, expected)
     assert ok is True, reason
 
 
-def test_rows_match_numeric_tolerance():
+def test_expected_rows_found_uses_any_successful_result_not_only_the_last():
+    expected = [{"order_count": 18623}]
+    calls = [
+        _ok([{"n": 18623}]),  # the query that answered the question
+        {"sql": "SELECT bad", "ok": False, "error_type": "bigquery_error", "rows": []},
+        _ok([{"min_created": "2024-01-01", "max_created": "2024-12-31"}]),  # a later sanity-check query
+    ]
+    assert expected_rows_found(calls, expected)[0] is True
+    # Rows of a failed attempt never count
+    assert expected_rows_found([{"sql": "x", "ok": False, "rows": [{"n": 18623}]}], expected)[0] is False
+
+
+def test_expected_rows_found_numeric_tolerance_and_values_in_one_row():
     expected = [{"gross_sales": 1124051.25}]
-    # Within 0.01% relative / 0.5 absolute tolerance
-    actual_close = [{"total": 1124051.20}]
-    ok, _ = rows_match(actual_close, expected, rel_tol=1e-4, abs_tol=0.1)
-    assert ok is True
-
-    # Outside tolerance
-    actual_far = [{"total": 1129000.00}]
-    ok_far, reason = rows_match(actual_far, expected, rel_tol=1e-4, abs_tol=0.1)
-    assert ok_far is False
-    assert "missing expected row values" in reason
-
-
-def test_rows_match_rejects_wrong_row_count_or_empty():
-    expected = [{"n": 10}, {"n": 20}]
-    ok, reason = rows_match([{"n": 10}], expected)
-    assert ok is False and "row count mismatch" in reason
-
-    ok_empty, reason_empty = rows_match([], expected)
-    assert ok_empty is False and "no rows returned" in reason_empty
+    assert expected_rows_found([_ok([{"total": 1124051.20}])], expected, rel_tol=1e-4, abs_tol=0.1)[0] is True
+    ok_far, reason = expected_rows_found([_ok([{"total": 1129000.00}])], expected, rel_tol=1e-4, abs_tol=0.1)
+    assert ok_far is False and "not found" in reason
+    # Both values of an expected row must sit in the same actual row
+    split = [_ok([{"dept": "Men", "cnt": 1}, {"dept": "Women", "cnt": 13131}])]
+    assert expected_rows_found(split, [{"department": "Men", "product_count": 13131}])[0] is False
+    assert expected_rows_found([], expected) == (False, "no successful SQL result in the run")
 
 
 def test_answer_mentions_expected_values_handles_commas_and_decimals():
@@ -159,16 +163,59 @@ def test_set_precision_recall_exact_and_partial():
     assert partial["extra"] == ["Jeans"]
 
 
-def test_extract_mentioned_items_handles_overlapping_category_names():
-    thresholds, _ = parse_return_rate_thresholds(REAL_DOCS)
-    universe = list(thresholds.keys())
-    answer = (
-        "The categories exceeding their policy thresholds are **Underwear**, **Suits**, "
-        "**Active**, **Jumpsuits & Rompers**, and **Plus**.\n"
-        "All other categories, including Suits & Sport Coats and Socks, are below their limits."
+def _fake_extractor(items, calls: list | None = None, error: bool = False):
+    """An extractor stand-in returning a fixed list of names."""
+
+    def extract(question, answer, universe, kind):
+        if calls is not None:
+            calls.append({"question": question, "answer": answer, "universe": universe, "kind": kind})
+        if error:
+            return {"items": [], "reason": "Extractor call failed after 3 retries: boom", "model": "fake", "extract_error": True}
+        return {"items": list(items), "model": "fake"}
+
+    return extract
+
+
+def test_set_questions_use_the_extractor_not_regex():
+    fake_rows = [
+        {"category": "Underwear", "returned_items": 799, "total_items": 7332, "return_rate_pct": 10.8974},
+        {"category": "Socks", "returned_items": 100, "total_items": 1000, "return_rate_pct": 10.0},
+    ]
+    item = {"id": "c", "category": "combined", "question": "Which breach?", "check": {"combined_type": "breaching_categories"}}
+    # The answer also names Socks, but only as under the limit; the extractor leaves it out.
+    answer = "Underwear is above its limit. Socks is close but still under its limit."
+    calls: list = []
+    res = score_item(
+        item, {"answer": answer}, None, docs_dir=REAL_DOCS, dataset="d",
+        query_runner=lambda sql: fake_rows, extractor=_fake_extractor(["Underwear"], calls),
     )
-    extracted = extract_mentioned_items(answer, universe)
-    assert extracted == ["Active", "Jumpsuits & Rompers", "Plus", "Suits", "Underwear"]
+    assert res["passed"] is True and res["set_metrics"]["precision"] == 1.0 and res["set_metrics"]["recall"] == 1.0
+    assert calls[0]["kind"] == "product categories" and "Socks" in calls[0]["universe"]
+
+    wrong = score_item(
+        item, {"answer": answer}, None, docs_dir=REAL_DOCS, dataset="d",
+        query_runner=lambda sql: fake_rows, extractor=_fake_extractor(["Underwear", "Socks"]),
+    )
+    assert wrong["passed"] is False and wrong["set_metrics"]["extra"] == ["Socks"] and wrong["set_metrics"]["precision"] == 0.5
+    assert wrong["infra_error"] is False
+
+    owners = {"id": "o", "category": "combined", "question": "Which owners?", "check": {"combined_type": "breaching_owners_set"}}
+    calls.clear()
+    res_owners = score_item(
+        owners, {"answer": "Hana Sato."}, None, docs_dir=REAL_DOCS, dataset="d",
+        query_runner=lambda sql: fake_rows, extractor=_fake_extractor(["Hana Sato"], calls),
+    )
+    assert res_owners["passed"] is True and calls[0]["kind"] == "category owners"
+
+
+def test_set_question_without_or_with_failed_extractor_is_infra():
+    fake_rows = [{"category": "Underwear", "returned_items": 799, "total_items": 7332, "return_rate_pct": 10.8974}]
+    item = {"id": "c", "category": "combined", "question": "Which breach?", "check": {"combined_type": "breaching_categories"}}
+    kwargs = {"docs_dir": REAL_DOCS, "dataset": "d", "query_runner": lambda sql: fake_rows}
+    none = score_item(item, {"answer": "Underwear"}, None, **kwargs)
+    down = score_item(item, {"answer": "Underwear"}, None, extractor=_fake_extractor([], error=True), **kwargs)
+    for res in (none, down):
+        assert res["passed"] is False and res["infra_error"] is True and res["error_type"] == "judge_unavailable"
 
 
 # ---------------------------------------------------------------- 4. Hit@k and MRR (retrieval eval)
@@ -308,7 +355,7 @@ def test_prompt_injection_quoting_the_trap_is_judged_not_substring_failed():
     assert obeyed["passed"] is False and "Judge rejected" in obeyed["reason"]
 
 
-def test_prompt_injection_state_checks_run_before_the_judge_and_fail_closed():
+def test_prompt_injection_state_checks_run_before_the_judge_and_missing_judge_is_infra():
     calls: list = []
     saved = check_refusal_response(
         INJECTION_ITEM,
@@ -319,11 +366,11 @@ def test_prompt_injection_state_checks_run_before_the_judge_and_fail_closed():
     assert calls == []  # the judge cannot rescue a state violation
 
     body = {"answer": "I can only answer ShopCo questions.", "sql": None, "saved_report": None}
-    no_judge = check_refusal_response(INJECTION_ITEM, body, judge=None)
-    assert no_judge["passed"] is False and "needs the LLM judge" in no_judge["reason"]
-
-    judge_down = check_refusal_response(INJECTION_ITEM, body, judge=_fake_judge(True, error=True))
-    assert judge_down["passed"] is False and "failing closed" in judge_down["reason"]
+    kwargs = {"docs_dir": REAL_DOCS, "dataset": "d"}
+    # No judge, or a judge that still fails after its retries: infra (judge_unavailable), not a wrong answer
+    for judge in (None, _fake_judge(True, error=True)):
+        res = score_item(INJECTION_ITEM, body, None, judge=judge, **kwargs)
+        assert res["passed"] is False and res["infra_error"] is True and res["error_type"] == "judge_unavailable"
 
 
 def test_not_in_documents_item_is_judged_through_score_item():
@@ -360,6 +407,7 @@ def test_combined_ground_truth_and_scoring_with_fake_query_runner():
         docs_dir=REAL_DOCS,
         dataset="bigquery-public-data.thelook_ecommerce",
         query_runner=lambda sql: fake_rows,
+        extractor=_fake_extractor(["Underwear", "Active"]),
     )
     assert res["passed"] is True
     assert res["set_metrics"]["exact_match"] is True
@@ -714,9 +762,15 @@ def test_every_document_fact_is_found_in_its_expected_sources():
 def test_doc_07_and_doc_08_patterns_reject_the_overlapping_shortcut():
     by_id = {it["id"]: it for it in load_golden()}
     doc_07 = by_id["doc_07"]["check"]["must_include"]
+    assert doc_07[0] == r"(?<!\d)(?<!\d,)500(?!\d)(?!,\d)"
     assert check_must_include("Gold needs 500 points, Platinum 1,500; 200 points = $10.", doc_07) == []
-    # "1,500" alone must not satisfy the Gold threshold
-    assert check_must_include("Platinum needs 1,500 points; 200 points = $10.", doc_07) == [doc_07[0]]
+    # 500 followed by a comma (list punctuation) still counts as the Gold threshold
+    assert check_must_include("Thresholds: Gold 500, Platinum 1,500, and 200 points = $10.", doc_07) == []
+    assert check_must_include("Gold: 500,Platinum: 1500. 200 points = $10.", doc_07) == []
+    # "1,500", "1500", "500,000" and "2500" alone must not satisfy the Gold threshold
+    for text in ("Platinum needs 1,500 points; 200 points = $10.", "Platinum 1500; 200 = $10.",
+                 "Budget 500,000; Platinum 1,500; 200 = $10.", "2500 or 1,500; 200 = $10."):
+        assert check_must_include(text, doc_07) == [doc_07[0]], text
 
     doc_08 = by_id["doc_08"]["check"]["must_include"]
     assert check_must_include("Suits and Suits & Sport Coats are excluded; the Tailoring team approves.", doc_08) == []
@@ -756,7 +810,7 @@ def test_expected_sources_requires_all_listed_files_for_combined():
         "question": "Which breach?",
         "check": {"combined_type": "breaching_categories", "expected_sources": ["returns_policy.md"]},
     }
-    kwargs = {"docs_dir": REAL_DOCS, "dataset": "d", "query_runner": lambda sql: fake_rows}
+    kwargs = {"docs_dir": REAL_DOCS, "dataset": "d", "query_runner": lambda sql: fake_rows, "extractor": _fake_extractor(["Underwear"])}
     body = {"answer": "Underwear is above its limit.", "rows": fake_rows}
     missing = score_item(item, {**body, "sources": []}, None, **kwargs)
     assert missing["passed"] is False and "missing expected sources ['returns_policy.md']" in missing["reason"]
@@ -805,3 +859,190 @@ def test_estimate_run_counts_judge_calls_for_judged_refusals():
     items = {it["id"]: it for it in load_golden()}
     est = estimate_run([("C", items["ref_06"], 1), ("C", items["ref_07"], 1), ("C", items["ref_01"], 1)])
     assert est["estimated_judge_calls"] == 2
+
+
+# ---------------------------------------------------------------- 13. Database scoring over the whole run
+
+
+DB_13 = {
+    "id": "db_13",
+    "category": "database",
+    "question": "how many orders got canceled in 2023?",
+    "check": {"reference_sql": "SELECT 1948", "tolerance": 0.001},
+}
+DB_KW = {"docs_dir": REAL_DOCS, "dataset": "d", "query_runner": lambda sql: [{"cancelled_orders_2023": 1948}]}
+
+
+def test_database_item_passes_with_extra_rows_columns_and_an_earlier_query():
+    # Like A db_13: the answer is right, the last query is a 5-row breakdown with extra columns.
+    breakdown = [{"order_status": "Cancelled", "num_orders": 1948, "num_items": 2770}, {"order_status": "Complete", "num_orders": 3307, "num_items": 4814}]
+    body = {"answer": "In 2023, 1,948 orders were canceled.", "sql": "SELECT ...", "rows": breakdown}
+    assert score_item(DB_13, body, None, **DB_KW)["passed"] is True  # cached runs: last rows only
+
+    # Like B db_13: the count came from an earlier query; the last one was a sanity check.
+    trace = {"sql_history": [_ok([{"n": 1948}]), _ok([{"has_shipped": 0, "has_delivered": 0}])]}
+    last_only = {"answer": "1,948 orders were cancelled.", "sql": "SELECT ...", "rows": [{"has_shipped": 0}]}
+    res = score_item(DB_13, last_only, None, trace=trace, **DB_KW)
+    assert res["passed"] is True and res["sql_execution_accurate"] is True and res["sql_attempts_seen"] == 2
+
+
+def test_database_item_fails_without_the_value_in_text_or_sql_or_with_a_write():
+    trace = {"sql_history": [_ok([{"n": 1948}])]}
+    no_text = score_item(DB_13, {"answer": "About two thousand orders."}, None, trace=trace, **DB_KW)
+    assert no_text["passed"] is False and "Answer mismatch" in no_text["reason"]
+
+    no_sql = score_item(DB_13, {"answer": "1,948 orders."}, None, trace={"sql_history": [_ok([{"n": 7}])]}, **DB_KW)
+    assert no_sql["passed"] is False and no_sql["sql_execution_accurate"] is False
+
+    write = {"sql_history": [_ok([{"n": 1948}]), {"sql": "DELETE FROM t WHERE true", "ok": True, "error_type": None, "rows": []}]}
+    res = score_item(DB_13, {"answer": "1,948 orders."}, None, trace=write, **DB_KW)
+    assert res["passed"] is False and "write SQL was executed" in res["reason"]
+
+
+# ---------------------------------------------------------------- 14. Tool errors and judge retries
+
+
+def test_failed_item_with_a_tool_error_is_infra_but_a_passing_one_stays_passed():
+    item = next(it for it in load_golden() if it["id"] == "doc_07")
+    # Like C doc_07: rag_agent's model calls raised; the system apologised.
+    record = {"llm_detail": [{"agent": "rag_agent", "error": "ClientError"}, {"agent": "rag_agent", "error": "ServerError"}]}
+    apology = {"answer": "The document lookup service encountered an error.", "sources": ["loyalty_program.md"]}
+    res = score_item(item, apology, None, docs_dir=REAL_DOCS, dataset="d", metrics_record=record)
+    assert res["passed"] is False and res["infra_error"] is True and res["error_type"] == "tool_error"
+    assert "rag_agent model call raised ClientError" in res["reason"]
+
+    good = {"answer": "Gold 500, Platinum 1,500; 200 points = $10.", "sources": ["loyalty_program.md"]}
+    ok = score_item(item, good, None, docs_dir=REAL_DOCS, dataset="d", metrics_record=record)
+    assert ok["passed"] is True and ok["tool_errors"]
+
+
+def test_find_tool_errors_counts_infra_not_the_agents_own_bad_sql():
+    record = {
+        "llm_detail": [{"agent": "critic", "error": "ServerError"}, {"agent": "orchestrator", "error": None}],
+        "tool_detail": [{"name": "run_query", "ok": False}, {"name": "retrieve", "ok": True}],
+    }
+    trace = {"sql_history": [{"sql": "SELECT x", "ok": False, "error_type": "bigquery_error", "rows": []}]}
+    assert find_tool_errors(record, trace) == []  # critic errors and fixable SQL errors are not tool infra
+
+    trace_quota = {"sql_history": [{"sql": "SELECT 1", "ok": False, "error_type": "quota_exceeded", "rows": []}]}
+    record_rag = {"tool_detail": [{"name": "retrieve", "ok": False}, {"name": "get_schema", "ok": False}]}
+    assert find_tool_errors(record_rag, trace_quota) == [
+        "retrieve returned an error",
+        "get_schema returned an error",
+        "run_query failed with quota_exceeded",
+    ]
+
+
+def test_call_with_retries_backs_off_and_gives_up_after_three_retries():
+    sleeps: list = []
+    attempts = {"n": 0}
+
+    def flaky():
+        attempts["n"] += 1
+        if attempts["n"] < 3:
+            raise RuntimeError("503")
+        return "ok"
+
+    assert call_with_retries(flaky, sleep=sleeps.append) == "ok"
+    assert sleeps == [1.0, 2.0]
+
+    sleeps.clear()
+    attempts["n"] = 0
+
+    def always_down():
+        attempts["n"] += 1
+        raise RuntimeError("503")
+
+    with pytest.raises(RuntimeError):
+        call_with_retries(always_down, sleep=sleeps.append)
+    assert attempts["n"] == 4 and sleeps == [1.0, 2.0, 4.0]
+
+
+def test_llm_judge_retries_then_reports_judge_error(monkeypatch, settings):
+    monkeypatch.setattr(judge_module, "_client_and_model", lambda s: (None, "judge-model"))
+    replies = iter([RuntimeError("503"), '{"passed": true, "reason": "fine"}'])
+
+    def fake_generate(client, model, system, prompt, schema):
+        r = next(replies)
+        if isinstance(r, Exception):
+            raise r
+        return r
+
+    monkeypatch.setattr(judge_module, "_generate_json", fake_generate)
+    judge = judge_module.make_llm_judge(settings, sleep=lambda s: None)
+    assert judge("q", "e", "a") == {"passed": True, "reason": "fine", "model": "judge-model"}
+
+    def always_fail(*args):
+        raise RuntimeError("503")
+
+    monkeypatch.setattr(judge_module, "_generate_json", always_fail)
+    down = judge_module.make_llm_judge(settings, sleep=lambda s: None)("q", "e", "a")
+    assert down["judge_error"] is True and "after 3 retries" in down["reason"]
+
+    extractor = judge_module.make_llm_extractor(settings, sleep=lambda s: None)
+    assert extractor("q", "a", ["X"], "product categories")["extract_error"] is True
+
+
+# ---------------------------------------------------------------- 15. Trace, rerun and rescore
+
+
+def test_runner_stores_the_trace_and_force_reruns_a_cached_item(tmp_path, settings):
+    settings = settings.model_copy(update={"docs_dir": REAL_DOCS})
+    calls = []
+
+    async def ask(service, question, timeout):
+        calls.append(question)
+        record = {"latency_ms": 10.0, "eval_trace": {"sql_history": [_ok([{"n": 1948}])], "upstream_error": None}}
+        return {"answer": "1,948 orders.", "sql": None, "rows": []}, record, None
+
+    run = lambda force: asyncio.run(  # noqa: E731
+        evaluate_one_task(
+            "B", object(), DB_13, 1, raw_dir=tmp_path, settings=settings, ask_fn=ask,
+            query_runner=DB_KW["query_runner"], retry_delay_seconds=0.0, force=force,
+        )
+    )
+    first = run(False)
+    assert first["score"]["passed"] is True  # scored from the trace, not the (empty) last rows
+    saved = json.loads((tmp_path / "B__db_13__r1.json").read_text())
+    assert saved["trace"]["sql_history"][0]["rows"] == [{"n": 1948}]
+    assert "eval_trace" not in saved["metrics_record"]
+
+    assert run(False)["cached"] is True and len(calls) == 1
+    assert run(True)["cached"] is False and len(calls) == 2
+
+
+def test_rescore_rewrites_cached_scores_without_calling_systems(tmp_path):
+    def raw(system, item, answer, rows, old_passed):
+        payload = {
+            "system": system, "id": item["id"], "category": item["category"], "smoke": False, "repeat": 1,
+            "question": item["question"], "attempts": 1, "timestamp": "t",
+            "response": {"answer": answer, "sql": "SELECT ...", "rows": rows},
+            "metrics_record": {"latency_ms": 1.0, "llm_detail": [], "tool_detail": []},
+            "error_type": None, "score": {"passed": old_passed, "infra_error": False, "reason": "old"},
+        }
+        (tmp_path / f"{system}__{item['id']}__r1.json").write_text(json.dumps(payload))
+
+    raw("A", DB_13, "1,948 orders were canceled.", [{"status": "Cancelled", "n": 1948}, {"status": "Complete", "n": 3307}], False)
+    raw("B", DB_13, "1,948 orders.", [{"n": 1948}], False)
+    rescored = asyncio.run(
+        rescore_cached(items=[DB_13], systems=["A"], raw_dir=tmp_path, query_runner=DB_KW["query_runner"], settings=_rescore_settings())
+    )
+    assert [r["system"] for r in rescored] == ["A"]
+    a = json.loads((tmp_path / "A__db_13__r1.json").read_text())
+    b = json.loads((tmp_path / "B__db_13__r1.json").read_text())
+    assert a["score"]["passed"] is True and "rescored_at" in a
+    assert b["score"]["reason"] == "old"  # not selected, untouched
+
+
+def _rescore_settings():
+    from app.config import Settings
+
+    return Settings(
+        _env_file=None, google_cloud_project="p", google_cloud_location="global", worker_model="m",
+        embedding_model="e", embedding_location="global", docs_dir=REAL_DOCS,
+    )
+
+
+def test_report_title_has_no_phase_number(tmp_path):
+    text = render_results_markdown([_make_raw_fixture_item("C", "doc_01", "documents", True)], None)
+    assert text.startswith("# Evaluation Report")

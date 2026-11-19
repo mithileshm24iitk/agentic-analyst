@@ -20,7 +20,7 @@ from app.metrics import finish_request, response_metrics, start_request
 from app.metrics_plugin import MetricsPlugin
 from app.orchestration import STATE_CRITIC, STATE_REVISIONS, STATE_ROUTE, AgentCritic, Orchestration, build_ask_response
 from app.tracing import request_span
-from tools.bigquery_tools import STATE_LAST_SQL
+from tools.bigquery_tools import STATE_HISTORY, STATE_LAST_SQL
 from tools.rag_tools import STATE_SOURCES
 from tools.upstream import STATE_UPSTREAM_ERROR
 
@@ -92,6 +92,14 @@ def build_system(system_id: str, settings: Settings | None = None, plugins: list
     return Orchestration(orchestrator, critic, max_revisions=s.critic_max_revisions)
 
 
+def eval_trace(state: dict[str, Any]) -> dict[str, Any]:
+    """The parts of the session state the scorer needs beyond the API response."""
+    return {
+        "sql_history": list(state.get(STATE_HISTORY, [])),
+        "upstream_error": state.get(STATE_UPSTREAM_ERROR),
+    }
+
+
 async def ask_in_process(
     service: Any,
     question: str,
@@ -100,7 +108,9 @@ async def ask_in_process(
 ) -> tuple[dict[str, Any] | None, dict[str, Any], str | None]:
     """Run one question through the exact /ask execution + metrics path (in-process, no HTTP).
 
-    Returns (response_body_or_none, metrics_record, error_type_or_none).
+    Returns (response_body_or_none, metrics_record, error_type_or_none). The metrics record also
+    carries "eval_trace" (every SQL attempt and any recorded upstream error from the session state),
+    which the runner moves into the raw result so scoring can look at the whole run.
     """
     request_id = uuid.uuid4().hex
     set_request_id(request_id)
@@ -116,11 +126,13 @@ async def ask_in_process(
                 raise ApiError("empty_answer", request_id)
         except ApiError as exc:
             record = finish_request(request_id, exc.error_type, result.state if result else {}, None)
+            record["eval_trace"] = eval_trace(result.state if result else {})
             span.set_attribute("route", record["route"])
             span.set_attribute("status", exc.error_type)
             return None, record, exc.error_type
 
         record = finish_request(request_id, "ok", result.state, None)
+        record["eval_trace"] = eval_trace(result.state)
         span.set_attribute("route", record["route"])
         span.set_attribute("status", "ok")
         body = {**build_ask_response(result), "metrics": response_metrics(record)}

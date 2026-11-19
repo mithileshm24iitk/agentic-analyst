@@ -7,7 +7,7 @@ Q ?= Which product categories are above their maximum acceptable return rate?
 
 .DEFAULT_GOAL := help
 
-.PHONY: help install run test test-integration ingest ask ask-sql ask-rag bench summary eval-smoke eval eval-retrieval eval-check eval-ground-truth \
+.PHONY: help install run test test-integration ingest ask ask-sql ask-rag bench summary eval-smoke eval eval-retrieval eval-check eval-ground-truth eval-rescore \
 	docker-build deploy smoke-prod
 
 help: ## List every target (the default when you run plain `make`)
@@ -62,11 +62,14 @@ eval-retrieval: ## Retrieval comparison: vector vs BM25 vs hybrid (no LLM)
 eval-smoke: ## Evaluation on the 8-question smoke set
 	$(PY) -m eval.run_eval --smoke
 
-eval: ## Full evaluation run (extra flags via ARGS="...")
+eval: ## Full evaluation run; cached items are skipped, infra failures rerun (ARGS="--system B --ids x,y --rerun")
 	$(PY) -m eval.run_eval $(ARGS)
 
 eval-ground-truth: ## Print every golden item's ground truth for hand-checking (BigQuery, no LLM)
 	$(PY) -m eval.show_ground_truth $(ARGS)
+
+eval-rescore: ## Re-score cached raw results with the current scorer (no system calls); rewrites results.md
+	$(PY) -m eval.run_eval --rescore $(ARGS)
 
 eval-check: ## Smoke evaluation + regression check against eval/baseline.json
 	$(PY) -m eval.run_eval --smoke --check-baseline $(if $(MAX_DROP),--max-drop-points $(MAX_DROP))

@@ -10,8 +10,11 @@ Features:
     wrong answers and retries an infra failure once before recording it.
   - Cost & call estimation: before a full run, prints estimated LLM calls and estimated
     USD cost from the Phase 5 benchmark averages, and waits for confirmation.
-  - Flags: `--smoke`, `--system`, `--category`, `--repeats N`, `--concurrency N`, `--yes`,
-    `--check-baseline`, `--max-drop-points`.
+  - Flags: `--smoke`, `--system`, `--category`, `--ids`, `--rerun`, `--rescore`, `--repeats N`,
+    `--concurrency N`, `--yes`, `--no-judge`, `--check-baseline`, `--max-drop-points`.
+  - Rerun chosen items: `--system B --ids comb_06,doc_07 --rerun` ignores their cache and calls the system again.
+  - Rescore (`--rescore`, make eval-rescore): re-scores the cached raw results with the current scorer,
+    judge and extractor without calling the systems, rewrites each raw file's score and results.md.
 """
 
 import argparse
@@ -23,7 +26,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from app.config import Settings, get_settings
-from eval.judge import JudgeFn, make_llm_judge
+from eval.judge import ExtractFn, JudgeFn, make_llm_extractor, make_llm_judge
 from eval.report import summarize_system, write_report_and_baseline
 from eval.retrieval_eval import ABLATION_OUT, evaluate_retrieval, format_ablation_table
 from eval.scoring import JUDGED_REFUSAL_TYPES, is_infra_error, score_item
@@ -137,6 +140,8 @@ def estimate_run(
         elif include_judge and cat == "combined" and item["check"].get("combined_type") in (
             "worst_breach_owner",
             "category_escalation",
+            "breaching_categories",  # extractor call
+            "breaching_owners_set",  # extractor call
         ):
             judge_calls += 1.0
             cost_usd += JUDGE_COST_PER_CALL_USD
@@ -163,11 +168,16 @@ async def evaluate_one_task(
     ask_fn: Callable[..., Any] = ask_in_process,
     query_runner: Callable[[str], list[dict[str, Any]]] | None = None,
     judge: JudgeFn | None = None,
+    extractor: ExtractFn | None = None,
     retry_delay_seconds: float = 2.0,
+    force: bool = False,
 ) -> dict[str, Any]:
-    """Run one (system, question, repeat) task, retrying once on infrastructure failure, and cache to disk."""
+    """Run one (system, question, repeat) task, retrying once on infrastructure failure, and cache to disk.
+
+    force=True ignores a cached result and calls the system again.
+    """
     out_path = cache_file_for(raw_dir, system_id, item["id"], repeat)
-    cached = load_cached_result(out_path)
+    cached = None if force else load_cached_result(out_path)
     if cached is not None:
         return {**cached, "cached": True}
 
@@ -187,6 +197,7 @@ async def evaluate_one_task(
             continue
         break
 
+    trace = record.pop("eval_trace", None) if record else None
     score = await asyncio.to_thread(
         score_item,
         item,
@@ -196,6 +207,9 @@ async def evaluate_one_task(
         dataset=settings.bq_dataset,
         query_runner=query_runner,
         judge=judge,
+        extractor=extractor,
+        metrics_record=record,
+        trace=trace,
     )
 
     payload = {
@@ -209,6 +223,7 @@ async def evaluate_one_task(
         "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "response": body,
         "metrics_record": record,
+        "trace": trace,
         "error_type": error_type,
         "score": score,
     }
@@ -229,7 +244,9 @@ async def run_evaluation(
     ask_fn: Callable[..., Any] = ask_in_process,
     query_runner: Callable[[str], list[dict[str, Any]]] | None = None,
     judge: JudgeFn | None = None,
+    extractor: ExtractFn | None = None,
     retry_delay_seconds: float = 2.0,
+    force: bool = False,
 ) -> list[dict[str, Any]]:
     """Run all (system, question, repeat) tasks with a concurrency semaphore and per-item disk caching."""
     s = settings or get_settings()
@@ -248,7 +265,9 @@ async def run_evaluation(
                 ask_fn=ask_fn,
                 query_runner=query_runner,
                 judge=judge,
+                extractor=extractor,
                 retry_delay_seconds=retry_delay_seconds,
+                force=force,
             )
             status = (
                 "CACHED"
@@ -256,7 +275,7 @@ async def run_evaluation(
                 else (
                     "PASS"
                     if res["score"]["passed"]
-                    else ("INFRA_ERR" if res["score"].get("infra_error") else "FAIL")
+                    else (f"INFRA_ERR:{res['score'].get('error_type')}" if res["score"].get("infra_error") else "FAIL")
                 )
             )
             lat = (res.get("metrics_record") or {}).get("latency_ms", 0.0) / 1000.0
@@ -273,6 +292,61 @@ async def run_evaluation(
         for item in items
     ]
     return list(await asyncio.gather(*coros))
+
+
+async def rescore_cached(
+    *,
+    items: list[dict[str, Any]],
+    systems: list[str] | None,
+    raw_dir: Path = RAW_DIR,
+    settings: Settings | None = None,
+    query_runner: Callable[[str], list[dict[str, Any]]] | None = None,
+    judge: JudgeFn | None = None,
+    extractor: ExtractFn | None = None,
+    concurrency: int = 4,
+) -> list[dict[str, Any]]:
+    """Re-score cached raw results with the current scorer, judge and extractor. Never calls a system.
+
+    Only raw files whose question id is in `items` (and system in `systems`, if given) are re-scored.
+    Each file's "score" is replaced and "rescored_at" is set. Returns the rescored payloads.
+    """
+    s = settings or get_settings()
+    by_id = {it["id"]: it for it in items}
+    sem = asyncio.Semaphore(max(1, concurrency))
+    paths = sorted(raw_dir.glob("*.json"))
+
+    async def _one(path: Path) -> dict[str, Any] | None:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        item = by_id.get(payload.get("id"))
+        if item is None or (systems and payload.get("system") not in systems):
+            return None
+        if payload.get("question") != item["question"]:
+            print(f"  WARNING {path.name}: question changed since this run; rerun it with --ids {item['id']} --rerun", flush=True)
+        async with sem:
+            score = await asyncio.to_thread(
+                score_item,
+                item,
+                payload.get("response"),
+                payload.get("error_type"),
+                docs_dir=s.docs_dir,
+                dataset=s.bq_dataset,
+                query_runner=query_runner,
+                judge=judge,
+                extractor=extractor,
+                metrics_record=payload.get("metrics_record"),
+                trace=payload.get("trace"),
+            )
+        old = payload.get("score", {})
+        payload["score"] = score
+        payload["rescored_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        path.write_text(json.dumps(payload, indent=2, default=str) + "\n", encoding="utf-8")
+        status = "PASS" if score["passed"] else (f"INFRA_ERR:{score.get('error_type')}" if score.get("infra_error") else "FAIL")
+        was = "PASS" if old.get("passed") else ("INFRA" if old.get("infra_error") else "FAIL")
+        print(f"  [{payload['system']}] {payload['id']}: {was} -> {status} - {score['reason'][:160]}", flush=True)
+        return payload
+
+    results = await asyncio.gather(*(_one(p) for p in paths))
+    return [r for r in results if r is not None]
 
 
 def check_against_baseline(
@@ -315,7 +389,7 @@ def check_against_baseline(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Phase 6 Evaluation Harness")
+    parser = argparse.ArgumentParser(description="Evaluation harness")
     parser.add_argument("--smoke", action="store_true", help="Run the 8-question smoke set on System C only.")
     parser.add_argument(
         "--system",
@@ -329,6 +403,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help="Comma-separated categories to run (documents,database,combined,refusal). Default: all.",
     )
+    parser.add_argument("--ids", type=str, default=None, help="Comma-separated question ids to run or rescore (e.g. 'doc_07,comb_06').")
+    parser.add_argument("--rerun", action="store_true", help="Ignore cached results for the selected tasks and call the systems again.")
+    parser.add_argument("--rescore", action="store_true", help="Re-score cached raw results with the current scorer; no system calls.")
     parser.add_argument("--repeats", type=int, default=1, help="Number of repeats per (system, question). Default: 1.")
     parser.add_argument("--concurrency", type=int, default=None, help="Max concurrent requests (default: EVAL_CONCURRENCY=4).")
     parser.add_argument("--yes", "-y", action="store_true", help="Skip interactive confirmation prompt.")
@@ -353,7 +430,39 @@ def main(argv: list[str] | None = None) -> int:
     categories = [c.strip() for c in args.category.split(",") if c.strip()] if args.category else None
     all_items = load_golden(GOLDEN_PATH)
     items = select_questions(all_items, smoke=args.smoke, categories=categories)
+    if args.ids:
+        wanted = [i.strip() for i in args.ids.split(",") if i.strip()]
+        unknown = sorted(set(wanted) - {it["id"] for it in all_items})
+        if unknown:
+            print(f"Unknown question ids: {', '.join(unknown)}", file=sys.stderr)
+            return 2
+        items = [it for it in items if it["id"] in set(wanted)]
     concurrency = args.concurrency or settings.eval_concurrency
+    judge = None if args.no_judge else make_llm_judge(settings)
+    extractor = None if args.no_judge else make_llm_extractor(settings)
+
+    if args.rescore:
+        print(f"Rescoring cached results in {RAW_DIR} (no system calls)...", flush=True)
+        rescored = asyncio.run(
+            rescore_cached(
+                items=items,
+                systems=[s.strip().upper() for s in args.system.split(",")] if args.system else None,
+                raw_dir=RAW_DIR,
+                settings=settings,
+                judge=judge,
+                extractor=extractor,
+                concurrency=concurrency,
+            )
+        )
+        write_report_and_baseline(
+            raw_dir=RAW_DIR,
+            report_path=REPORT_PATH,
+            baseline_path=BASELINE_PATH,
+            ablation_path=ABLATION_OUT,
+            update_baseline=True,
+        )
+        print(f"\nRescored {len(rescored)} cached result(s). Wrote {REPORT_PATH} and {BASELINE_PATH}.", flush=True)
+        return 0
 
     # Identify which tasks are not cached yet
     pending = [
@@ -361,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
         for sys_id in systems
         for rep in range(1, args.repeats + 1)
         for item in items
-        if load_cached_result(cache_file_for(RAW_DIR, sys_id, item["id"], rep)) is None
+        if args.rerun or load_cached_result(cache_file_for(RAW_DIR, sys_id, item["id"], rep)) is None
     ]
     total_tasks = len(systems) * len(items) * args.repeats
     cached_count = total_tasks - len(pending)
@@ -398,7 +507,6 @@ def main(argv: list[str] | None = None) -> int:
         except Exception as exc:
             print(f"Note: could not compute retrieval ablation ({exc})", flush=True)
 
-    judge = None if args.no_judge else make_llm_judge(settings)
     results = asyncio.run(
         run_evaluation(
             systems=systems,
@@ -408,6 +516,8 @@ def main(argv: list[str] | None = None) -> int:
             raw_dir=RAW_DIR,
             settings=settings,
             judge=judge,
+            extractor=extractor,
+            force=args.rerun,
         )
     )
 
